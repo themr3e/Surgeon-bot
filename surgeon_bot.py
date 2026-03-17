@@ -85,18 +85,22 @@ last_dashboard_print: float = 0.0
 # إعداد الاتصال بالبورصة — Exchange Connection Setup
 # =====================================================================
 
-def create_exchange() -> ccxt.binance:
-    """إنشاء كائن الاتصال ببورصة Binance Futures"""
-    exchange = ccxt.binance({
-        "apiKey":  API_KEY,
-        "secret":  API_SECRET,
-        "options": {
-            "defaultType": "future",
-        },
+def create_exchange() -> ccxt.binanceusdm:
+    """
+    إنشاء كائن الاتصال ببورصة Binance USDT-M Futures.
+    نستخدم ccxt.binanceusdm بدلاً من ccxt.binance لأنه مخصص لعقود USDT الدائمة،
+    و set_sandbox_mode(True) يعيّن روابط testnet.binancefuture.com تلقائياً.
+    Using binanceusdm instead of binance so set_sandbox_mode correctly targets
+    the futures testnet (testnet.binancefuture.com) not the spot testnet.
+    """
+    exchange = ccxt.binanceusdm({
+        "apiKey": API_KEY,
+        "secret": API_SECRET,
     })
-    # تفعيل الشبكة التجريبية إذا كانت مفعّلة
+
     if TESTNET:
         exchange.set_sandbox_mode(True)
+
     exchange.load_markets()
     return exchange
 
@@ -166,7 +170,7 @@ def log_trade(symbol: str, direction: str, entry_price: float,
 STABLE_COINS = {"USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD"}
 
 
-def fetch_top_symbols(exchange: ccxt.binance) -> list:
+def fetch_top_symbols(exchange: ccxt.binanceusdm) -> list:
     """
     جلب أفضل 200 رمز بحجم التداول من عقود USDT الدائمة
     Fetch top 200 USDT perpetual futures by 24h quote volume.
@@ -201,7 +205,7 @@ def fetch_top_symbols(exchange: ccxt.binance) -> list:
         return active_symbols
 
 
-def maybe_refresh_symbols(exchange: ccxt.binance):
+def maybe_refresh_symbols(exchange: ccxt.binanceusdm):
     """تحديث قائمة الرموز كل 4 ساعات"""
     global active_symbols, symbols_last_updated
     now = time.time()
@@ -213,7 +217,7 @@ def maybe_refresh_symbols(exchange: ccxt.binance):
 # جلب الشمعات وحساب المؤشرات — Candles & Indicators
 # =====================================================================
 
-def fetch_candles(exchange: ccxt.binance, symbol: str) -> pd.DataFrame | None:
+def fetch_candles(exchange: ccxt.binanceusdm, symbol: str) -> pd.DataFrame | None:
     """
     جلب آخر 200 شمعة مغلقة بالإطار الزمني 5 دقائق
     Returns a DataFrame with OHLCV data, or None on failure.
@@ -247,9 +251,16 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # مؤشر القوة النسبية
     df.ta.rsi(length=14, append=True)   # RSI_14
 
-    # VWAP — يُعاد تعيينه يومياً
-    # pandas_ta يحسب VWAP بشكل افتراضي مع إعادة التعيين اليومية
-    df.ta.vwap(append=True)             # VWAP_D
+    # VWAP — pandas_ta يتطلب DatetimeIndex مرتبة لحساب VWAP
+    # نضع العمود timestamp كـ index مؤقتاً ثم نعيد تعيينه
+    df_indexed = df.set_index("timestamp")
+    vwap_series = df_indexed.ta.vwap()   # VWAP_D
+    if vwap_series is not None:
+        if isinstance(vwap_series, pd.DataFrame):
+            for col in vwap_series.columns:
+                df[col] = vwap_series[col].values
+        else:
+            df[vwap_series.name] = vwap_series.values
 
     # MACD
     df.ta.macd(fast=12, slow=26, signal=9, append=True)
@@ -364,7 +375,7 @@ def check_signal(df: pd.DataFrame) -> str | None:
 # دورة المسح — Scanning Cycle
 # =====================================================================
 
-def scan_symbols(exchange: ccxt.binance) -> dict | None:
+def scan_symbols(exchange: ccxt.binanceusdm) -> dict | None:
     """
     مسح جميع الرموز للبحث عن إشارات صالحة.
     Returns the best signal dict or None.
@@ -411,7 +422,7 @@ def scan_symbols(exchange: ccxt.binance) -> dict | None:
 # معلومات الرمز من البورصة — Symbol Market Info
 # =====================================================================
 
-def get_symbol_precision(exchange: ccxt.binance, symbol: str) -> tuple[int, int]:
+def get_symbol_precision(exchange: ccxt.binanceusdm, symbol: str) -> tuple[int, int]:
     """
     الحصول على دقة الكمية والسعر للرمز من معلومات السوق
     Returns (amount_precision, price_precision)
@@ -434,7 +445,7 @@ def round_down(value: float, decimals: int) -> float:
 # تنفيذ الصفقة — Trade Execution
 # =====================================================================
 
-def execute_trade(exchange: ccxt.binance, signal: dict) -> bool:
+def execute_trade(exchange: ccxt.binanceusdm, signal: dict) -> bool:
     """
     تنفيذ الصفقة كاملةً: تعيين الرافعة، إدخال السوق، وضع TP/SL
     Returns True on success, False on failure.
@@ -603,7 +614,7 @@ def execute_trade(exchange: ccxt.binance, signal: dict) -> bool:
 # مراقبة الصفقة — Trade Monitoring
 # =====================================================================
 
-def is_position_open(exchange: ccxt.binance, symbol: str) -> bool:
+def is_position_open(exchange: ccxt.binanceusdm, symbol: str) -> bool:
     """التحقق من أن المركز لا يزال مفتوحاً"""
     try:
         positions = api_call(exchange.fetch_positions, [symbol])
@@ -619,7 +630,7 @@ def is_position_open(exchange: ccxt.binance, symbol: str) -> bool:
         return True
 
 
-def get_current_price(exchange: ccxt.binance, symbol: str) -> float:
+def get_current_price(exchange: ccxt.binanceusdm, symbol: str) -> float:
     """جلب السعر الحالي"""
     ticker = api_call(exchange.fetch_ticker, symbol)
     if ticker:
@@ -627,7 +638,7 @@ def get_current_price(exchange: ccxt.binance, symbol: str) -> float:
     return 0.0
 
 
-def cancel_tp_sl(exchange: ccxt.binance):
+def cancel_tp_sl(exchange: ccxt.binanceusdm):
     """إلغاء أوامر TP و SL المعلقة"""
     global current_trade
     symbol = current_trade.get("symbol")
@@ -644,7 +655,7 @@ def cancel_tp_sl(exchange: ccxt.binance):
                 print(f"  [تحذير] فشل إلغاء الأمر #{order_id}: {e}")
 
 
-def close_position_market(exchange: ccxt.binance):
+def close_position_market(exchange: ccxt.binanceusdm):
     """إغلاق المركز المفتوح بأمر سوق"""
     global current_trade
     symbol    = current_trade.get("symbol")
@@ -669,7 +680,7 @@ def close_position_market(exchange: ccxt.binance):
         print(f"  [خطأ] فشل إغلاق المركز: {e}")
 
 
-def monitor_trade(exchange: ccxt.binance):
+def monitor_trade(exchange: ccxt.binanceusdm):
     """
     مراقبة الصفقة المفتوحة حتى إغلاقها.
     يعود بعد إغلاق الصفقة (TP / SL / TIMEOUT).
@@ -887,7 +898,7 @@ def print_banner():
 # المعالجة عند الإنهاء — Graceful Shutdown
 # =====================================================================
 
-def graceful_shutdown(exchange: ccxt.binance):
+def graceful_shutdown(exchange: ccxt.binanceusdm):
     """
     إغلاق نظيف عند Ctrl+C:
     إلغاء أوامر TP/SL، إغلاق المركز المفتوح بالسوق، حفظ السجلات
