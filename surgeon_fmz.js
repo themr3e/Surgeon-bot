@@ -1098,6 +1098,13 @@ function main() {
     // Print banner
     printBanner();
 
+    // Guard: exchange must be bound in FMZ before starting
+    if (typeof exchange === "undefined" || exchange === null) {
+        Log("[FATAL] No exchange object found. Please add a Binance Futures exchange account");
+        Log("[FATAL] in FMZ → My Exchanges and attach it to this live bot, then restart.");
+        throw new Error("Exchange not configured — bot halted.");
+    }
+
     // Validate settings
     if (LEVERAGE < 1 || LEVERAGE > 125) {
         Log("[ERROR] Leverage must be between 1 and 125!");
