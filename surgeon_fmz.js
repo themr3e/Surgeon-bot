@@ -47,6 +47,7 @@ var POSITION_POLL_MS     = 10000;      // Poll position every 10 seconds
 var MIN_BALANCE          = 50;         // Minimum balance before stopping
 var SYMBOL_REFRESH_HOURS = 4;          // Refresh symbol list every 4 hours
 var DASHBOARD_INTERVAL   = 300000;     // Print dashboard every 5 minutes (ms)
+var USE_MARKET_BIAS      = true;       // Enable/disable 200 EMA daily market bias filter
 
 // =====================================================================
 // Testnet Symbol List
@@ -270,6 +271,33 @@ function calcVolSMA(records, period) {
 }
 
 // =====================================================================
+// Market Bias Filter (Daily EMA200)
+// =====================================================================
+
+ // Fetch daily candles and determine market bias using EMA200
+ // Returns "BULL" if last closed daily candle is above EMA200,
+ // "BEAR" if below, "NEUTRAL" if equal or on error
+function getMarketBias() {
+    try {
+        var dailyRecords = exchange.GetRecords(PERIOD_D1);
+        if (!dailyRecords || dailyRecords.length < 201) return "NEUTRAL";
+
+        var ema200Arr = TA.EMA(dailyRecords, 200);
+        var idx       = dailyRecords.length - 2; // last fully closed daily candle
+        var closePrice = dailyRecords[idx].Close;
+        var ema200     = ema200Arr[idx];
+
+        if (isNaN(ema200) || ema200 === 0) return "NEUTRAL";
+
+        if (closePrice > ema200) return "BULL";
+        if (closePrice < ema200) return "BEAR";
+        return "NEUTRAL";
+    } catch (e) {
+        return "NEUTRAL";
+    }
+}
+
+// =====================================================================
 // Five-Condition Signal Check
 // =====================================================================
 
@@ -370,12 +398,24 @@ function checkSignal(records) {
     // ─────────────────────────────────────────────
     // Final signal evaluation — all five conditions must be met
     // ─────────────────────────────────────────────
+    var signal = null;
     if (emaCrossLong && rsiLong && vwapLong && volSpike && macdCrossLong) {
-        return "LONG";
+        signal = "LONG";
     }
     if (emaCrossShort && rsiShort && vwapShort && volSpike && macdCrossShort) {
-        return "SHORT";
+        signal = "SHORT";
     }
+
+    // ─────────────────────────────────────────────
+    // Market Bias Filter (Daily EMA200)
+    // ─────────────────────────────────────────────
+    if (!USE_MARKET_BIAS) return signal;
+    if (signal === null) return null;
+
+    var bias = getMarketBias();
+    if (bias === "NEUTRAL") return signal;
+    if (bias === "BULL" && signal === "LONG")  return "LONG";
+    if (bias === "BEAR" && signal === "SHORT") return "SHORT";
     return null;
 }
 
@@ -1046,6 +1086,7 @@ function printDashboard() {
     Log("|  Timeouts           :", timeouts);
     Log("+----------------------------------------------+");
     Log("|  Status             :", status);
+    Log("|  Market Bias        :", getMarketBias());
     Log("|  Symbol             :", symDisp);
     Log("|  Direction          :", dirDisp);
     Log("|  Entry Price        :", entryDisp);
