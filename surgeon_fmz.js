@@ -400,6 +400,7 @@ function scanSymbols() {
         now.getUTCHours() + ":" + now.getUTCMinutes() + " UTC");
 
     var candidates = []; // list of candidate signals
+    var skipped = 0, scanned = 0, errored = 0;
 
     for (var i = 0; i < activeSymbols.length; i++) {
         var fmzSym = activeSymbols[i];
@@ -412,9 +413,13 @@ function scanSymbols() {
             // Fetch candles
             var records = exchange.GetRecords(TIMEFRAME);
             if (!records || records.length < 50) {
+                Log("[DEBUG]", fmzSym, "— skipped (candles:", records ? records.length : 0, ")");
+                skipped++;
                 Sleep(SYMBOL_DELAY_MS);
                 continue;
             }
+
+            scanned++;
 
             // Analyze signal
             var signal = checkSignal(records);
@@ -434,15 +439,19 @@ function scanSymbols() {
 
                 Log("[SIGNAL]", fmzSym, "->", signal,
                     "| vol:", vol.toFixed(0));
+            } else {
+                Log("[DEBUG]", fmzSym, "— scanned, no signal");
             }
 
         } catch (e) {
-            // Skip symbols that cause errors (may not be available)
-            // Log("[WARN] Error on", fmzSym, ":", e.message);
+            errored++;
+            Log("[WARN]", fmzSym, "— error:", e.message);
         }
 
         Sleep(SYMBOL_DELAY_MS);
     }
+
+    Log("[SCAN] Done — scanned:", scanned, "| skipped:", skipped, "| errors:", errored, "| signals:", candidates.length);
 
     if (candidates.length === 0) {
         return null;
