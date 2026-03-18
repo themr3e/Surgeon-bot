@@ -48,6 +48,9 @@ var MAX_DAILY_LOSS       = 50;         // Max cumulative realized loss (SL trade
 var SYMBOL_REFRESH_HOURS = 4;          // Refresh symbol list every 4 hours
 var DASHBOARD_INTERVAL   = 300000;     // Print dashboard every 5 minutes (ms)
 var USE_MARKET_BIAS      = true;       // Enable/disable 200 EMA daily market bias filter
+var TELEGRAM_TOKEN      = "8756049447:AAHAiLLFFaNF6ifw5ybEKAcT0TmRYtDhOW0";
+var TELEGRAM_CHAT_ID    = "8724850558";
+var TELEGRAM_NOTIFY_MS  = 3600000;     // 1 hour in milliseconds
 
 // =====================================================================
 // Testnet Symbol List
@@ -83,6 +86,8 @@ var stats = {
 };
 
 var lastDashboardPrint = 0;   // Timestamp of last dashboard print
+var lastTelegramTime   = 0;   // Timestamp of last hourly notification
+var hourlyLogBuffer    = {};  // stores log message counts for hourly summary
 
 // =====================================================================
 // Symbol Format Conversion
@@ -828,6 +833,18 @@ function executeTrade(signal) {
         open:       true
     };
 
+    var marginUsed = (currentTrade.size * currentTrade.entryPrice / LEVERAGE).toFixed(2);
+    sendTelegram(
+        "<b>🟢 TRADE OPENED</b>\n" +
+        "━━━━━━━━━━━━━━━━━━\n" +
+        "Symbol: " + currentTrade.symbol + "\n" +
+        "Direction: " + currentTrade.direction + "\n" +
+        "Entry Price: $" + currentTrade.entryPrice.toFixed(4) + "\n" +
+        "Margin: $" + marginUsed + "\n" +
+        "Take Profit: $" + currentTrade.tpPrice.toFixed(4) + "\n" +
+        "Stop Loss: $" + currentTrade.slPrice.toFixed(4)
+    );
+
     return true;
 }
 
@@ -1021,6 +1038,27 @@ function monitorTrade() {
     Log("[RESULT] New balance  : $" + stats.balance.toFixed(2));
     Log("======================================\n");
 
+    // Telegram notification — trade closed
+    var pnlSign   = pnlUsdt >= 0 ? "+" : "";
+    var closeEmoji = closeReason === "TP" ? "✅" :
+                     closeReason === "SL" ? "🔴" : "⏱";
+    var closeLabel = closeReason === "TP"      ? "TAKE PROFIT" :
+                     closeReason === "SL"      ? "STOP LOSS" :
+                     closeReason === "TIMEOUT" ? "TIMEOUT (20min)" : closeReason;
+    var marginClosed = (currentTrade.size * currentTrade.entryPrice / LEVERAGE).toFixed(2);
+    var totalRealizedLoss = (INITIAL_CAPITAL - stats.balance).toFixed(2);
+
+    sendTelegram(
+        closeEmoji + " <b>TRADE CLOSED — " + closeLabel + "</b>\n" +
+        "━━━━━━━━━━━━━━━━━━\n" +
+        "Symbol: " + currentTrade.symbol + "\n" +
+        "Direction: " + currentTrade.direction + "\n" +
+        "Margin: $" + marginClosed + "\n" +
+        "PnL: " + pnlSign + "$" + pnlUsdt.toFixed(2) + " USDT\n" +
+        "New Balance: $" + stats.balance.toFixed(2) + "\n" +
+        "Total Realized Loss: $" + totalRealizedLoss
+    );
+
     // Log profit to FMZ platform (shown in performance chart)
     LogProfit(stats.balance);
 
@@ -1124,8 +1162,72 @@ function printBanner() {
 // Main Loop (FMZ entry point)
 // =====================================================================
 
- // Main function — called automatically by FMZ when strategy starts
- // Runs in infinite loop until stopped from FMZ dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+// Telegram notification helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function sendTelegram(msg) {
+    try {
+        var url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN +
+                  "/sendMessage?chat_id=" + TELEGRAM_CHAT_ID +
+                  "&text=" + encodeURIComponent(msg) +
+                  "&parse_mode=HTML";
+        HttpQuery(url);
+    } catch(e) {
+        Log("[WARN] Telegram send failed:", e.message || e);
+    }
+}
+
+function bufferLog(key) {
+    if (!hourlyLogBuffer[key]) {
+        hourlyLogBuffer[key] = 0;
+    }
+    hourlyLogBuffer[key] += 1;
+}
+
+function sendHourlyNotification() {
+    var now = Date.now();
+    if (now - lastTelegramTime < TELEGRAM_NOTIFY_MS) return;
+    lastTelegramTime = now;
+
+    var statusEmoji = (currentTrade !== null) ? "👍🏻 Running — In Trade" : "👍🏻 Running — Scanning";
+    var realizedLoss = INITIAL_CAPITAL - stats.balance;
+
+    var summary = "";
+    var keys = Object.keys(hourlyLogBuffer);
+    if (keys.length === 0) {
+        summary = "No activity this hour.";
+    } else {
+        for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            var count = hourlyLogBuffer[k];
+            if (count === 1) {
+                summary += k + "\n";
+            } else {
+                summary += k + " x" + count + "\n";
+            }
+        }
+    }
+
+    hourlyLogBuffer = {};
+
+    var msg =
+        "<b>🤖 Surgeon Bot — Hourly Report</b>\n" +
+        "━━━━━━━━━━━━━━━━━━\n" +
+        statusEmoji + "\n" +
+        "Balance: $" + stats.balance.toFixed(2) + "\n" +
+        "Realized Loss: $" + realizedLoss.toFixed(2) + "\n" +
+        "Total Trades: " + stats.totalTrades + "\n" +
+        "Wins: " + stats.wins + " | Losses: " + stats.losses + " | Timeouts: " + stats.timeouts + "\n" +
+        "━━━━━━━━━━━━━━━━━━\n" +
+        "<b>Last Hour Activity:</b>\n" +
+        summary;
+
+    sendTelegram(msg);
+}
+
+// Main function — called automatically by FMZ when strategy starts
+// Runs in infinite loop until stopped from FMZ dashboard
 function main() {
     // Print banner
     printBanner();
@@ -1177,6 +1279,8 @@ function main() {
     // Main infinite loop
     while (true) {
 
+        sendHourlyNotification();
+
         // Refresh symbol list every 4 hours
         maybeRefreshSymbols();
 
@@ -1192,14 +1296,25 @@ function main() {
                 " reached limit $" + MAX_DAILY_LOSS +
                 " from initial capital $" + INITIAL_CAPITAL + " — stopping for review.");
             printDashboard();
+            sendTelegram(
+                "👎🏻 <b>SURGEON BOT STOPPED</b>\n" +
+                "━━━━━━━━━━━━━━━━━━\n" +
+                "Reason: Realized loss limit reached\n" +
+                "Loss: $" + (INITIAL_CAPITAL - stats.balance).toFixed(2) + "\n" +
+                "Initial Capital: $" + INITIAL_CAPITAL + "\n" +
+                "Final Balance: $" + stats.balance.toFixed(2) + "\n" +
+                "Review your strategy before restarting."
+            );
             break; // Stop loop — FMZ will halt the strategy
         }
 
         // If no open trade, look for a signal
         if (!currentTrade) {
             var signal = scanSymbols();
+            bufferLog("SCAN");
 
             if (signal) {
+                bufferLog("SIGNAL FOUND");
                 // Attempt to execute trade
                 var success = executeTrade(signal);
 
@@ -1207,11 +1322,13 @@ function main() {
                     // Monitor trade until closed (TP / SL / TIMEOUT)
                     monitorTrade();
                 } else {
+                    bufferLog("TRADE ERROR");
                     Log("[WARN] Failed to execute trade on", signal.symbol);
                     Sleep(5000);
                 }
 
             } else {
+                bufferLog("NO SIGNAL");
                 Log("[SCAN] No signals found — waiting " +
                     (SCAN_INTERVAL_MS / 1000) + " seconds...");
 
