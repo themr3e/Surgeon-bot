@@ -514,24 +514,27 @@ function getSymbolStepSize(binanceSym) {
             var s = info.symbols[i];
             if (s.symbol === binanceSym) {
                 var stepSize       = 0.001;
+                var tickSize       = 0.01;
                 var pricePrecision = s.pricePrecision || 2;
 
-                // Search symbol filters for LOT_SIZE
+                // Search symbol filters for LOT_SIZE and PRICE_FILTER
                 if (s.filters) {
                     for (var j = 0; j < s.filters.length; j++) {
                         if (s.filters[j].filterType === "LOT_SIZE") {
                             stepSize = parseFloat(s.filters[j].stepSize) || 0.001;
-                            break;
+                        }
+                        if (s.filters[j].filterType === "PRICE_FILTER") {
+                            tickSize = parseFloat(s.filters[j].tickSize) || 0.01;
                         }
                     }
                 }
-                return { stepSize: stepSize, pricePrecision: pricePrecision };
+                return { stepSize: stepSize, tickSize: tickSize, pricePrecision: pricePrecision };
             }
         }
     } catch (e) {
         Log("[WARN] Failed to fetch symbol info:", e.message);
     }
-    return { stepSize: 0.001, pricePrecision: 2 };
+    return { stepSize: 0.001, tickSize: 0.01, pricePrecision: 2 };
 }
 
  // Calculate decimal places from stepSize value
@@ -717,7 +720,7 @@ function executeTrade(signal) {
     // Fetch symbol precision info
     var symInfo    = getSymbolStepSize(binSym);
     var stepSize   = symInfo.stepSize;
-    var priceDec   = symInfo.pricePrecision;
+    var priceDec   = getDecimals(symInfo.tickSize);
     var amountDec  = getDecimals(stepSize);
 
     // Calculate position size: risk a fixed % of balance, capped at MAX_ORDER_USDT
@@ -790,6 +793,14 @@ function executeTrade(signal) {
     } else {
         tpPrice = Math.round(fillPrice * TP_PCT_SHORT * priceFactor) / priceFactor;
         slPrice = Math.round(fillPrice * SL_PCT_SHORT * priceFactor) / priceFactor;
+    }
+
+    // Fix 1: Validate TP and SL are distinct from entry price
+    if (tpPrice === fillPrice || slPrice === fillPrice) {
+        Log("[SKIP] Symbol skipped — price precision too low for TP/SL on " + binSym);
+        exchange.SetDirection(dir === "LONG" ? "closebuy" : "closesell");
+        if (dir === "LONG") { exchange.Sell(-1, size); } else { exchange.Buy(-1, size); }
+        return false;
     }
 
     Log("[TARGETS] TP: $" + tpPrice.toFixed(priceDec) +
