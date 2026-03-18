@@ -1,1 +1,524 @@
-1
+/*
++==============================================================+
+|          THE SURGEON BOT — BACKTEST EDITION                 |
+|          FMZ Quant | Binance Futures USDT-M Perpetual       |
++==============================================================+
+
+HOW TO RUN BACKTEST ON FMZ:
+  1. Go to fmz.com → Strategy → paste this code → Save
+  2. Click "Backtest" tab
+  3. Set exchange: Binance Futures (USDT-M)
+  4. Set symbol to match BACKTEST_SYMBOL below (e.g. BTC_USDT)
+  5. Set contract type: swap
+  6. Set timeframe: 15 minutes
+  7. Set start date, end date, initial balance
+  8. Click Run
+
+DIFFERENCES FROM LIVE BOT:
+  - Single symbol only (no scanning) — set BACKTEST_SYMBOL below
+  - Telegram disabled (no HttpQuery in backtest)
+  - No exchange.IO() API calls (leverage set in FMZ backtest config)
+  - isPositionOpen() checks Amount field, not symbol name
+  - Market orders use current price (not -1) for better fill simulation
+  - Cooldown map and hourly notifications removed (not useful in backtest)
+*/
+
+// =====================================================================
+// Backtest Configuration
+// =====================================================================
+var BACKTEST_SYMBOL      = "BTC_USDT";   // Symbol to test — must match FMZ backtest pair
+var INITIAL_CAPITAL      = 500;           // Starting balance (set same value in FMZ backtest config)
+var TIMEFRAME            = PERIOD_M15;   // 15-minute candles
+var CANDLES_LIMIT        = 201;
+var LEVERAGE             = 10;           // Must also be set in FMZ backtest config
+
+var MAX_ORDER_USDT       = 200;
+var TP_PCT_LONG          = 1.060;        // +6% take profit for long
+var TP_PCT_SHORT         = 0.940;        // -6% take profit for short
+var SL_PCT_LONG          = 0.980;        // -2% stop loss for long
+var SL_PCT_SHORT         = 1.020;        // +2% stop loss for short
+var MAX_TRADE_MINUTES    = 20;
+var POSITION_POLL_MS     = 60000;        // 1 candle = 15min; poll every 1 min sim time
+var USE_MARKET_BIAS      = true;         // Enable 200 EMA daily bias filter
+
+// =====================================================================
+// Global State
+// =====================================================================
+var currentTrade = null;
+
+var stats = {
+    balance:     INITIAL_CAPITAL,
+    totalTrades: 0,
+    wins:        0,
+    losses:      0,
+    timeouts:    0,
+    totalPnl:    0.0
+};
+
+// =====================================================================
+// Helpers
+// =====================================================================
+
+function floorTo(value, decimals) {
+    var factor = Math.pow(10, decimals);
+    return Math.floor(value * factor) / factor;
+}
+
+function getDecimals(stepSize) {
+    if (stepSize >= 1) return 0;
+    var s = stepSize.toString();
+    var dotIndex = s.indexOf(".");
+    if (dotIndex === -1) return 0;
+    return s.length - dotIndex - 1;
+}
+
+// Telegram: disabled in backtest — kept as stub so code stays identical to live bot
+function sendTelegram(msg) {
+    // Not used in backtest
+}
+
+// =====================================================================
+// Technical Indicators
+// =====================================================================
+
+function calcVWAP(records) {
+    var vwapArr = [];
+    var cumTPV  = 0;
+    var cumVol  = 0;
+    var dayStart = -1;
+
+    for (var i = 0; i < records.length; i++) {
+        var r  = records[i];
+        var tp = (r.High + r.Low + r.Close) / 3;
+        var day = Math.floor(r.Time / 86400000);
+
+        if (day !== dayStart) {
+            cumTPV   = 0;
+            cumVol   = 0;
+            dayStart = day;
+        }
+
+        cumTPV += tp * r.Volume;
+        cumVol += r.Volume;
+        vwapArr.push(cumVol > 0 ? cumTPV / cumVol : tp);
+    }
+    return vwapArr;
+}
+
+function calcVolSMA(records, period) {
+    var result = [];
+    for (var i = 0; i < records.length; i++) {
+        if (i < period - 1) { result.push(NaN); continue; }
+        var sum = 0;
+        for (var j = i - period + 1; j <= i; j++) sum += records[j].Volume;
+        result.push(sum / period);
+    }
+    return result;
+}
+
+// =====================================================================
+// Market Bias Filter (Daily EMA200)
+// =====================================================================
+
+function getMarketBias() {
+    try {
+        var dailyRecords = exchange.GetRecords(PERIOD_D1);
+        if (!dailyRecords || dailyRecords.length < 201) return "NEUTRAL";
+
+        var ema200Arr  = TA.EMA(dailyRecords, 200);
+        var idx        = dailyRecords.length - 2; // last closed daily candle
+        var closePrice = dailyRecords[idx].Close;
+        var ema200     = ema200Arr[idx];
+
+        if (isNaN(ema200) || ema200 === 0) return "NEUTRAL";
+        if (closePrice > ema200) return "BULL";
+        if (closePrice < ema200) return "BEAR";
+        return "NEUTRAL";
+    } catch (e) {
+        return "NEUTRAL";
+    }
+}
+
+// =====================================================================
+// Five-Condition Signal Check
+// =====================================================================
+
+function checkSignal(records) {
+    if (!records || records.length < 30) return null;
+
+    var recs = records.slice(0, records.length - 1); // exclude unclosed candle
+    var n    = recs.length;
+    if (n < 30) return null;
+
+    var ema9Arr    = TA.EMA(recs, 9);
+    var ema21Arr   = TA.EMA(recs, 21);
+    var rsiArr     = TA.RSI(recs, 14);
+    var macdResult = TA.MACD(recs, 12, 26, 9);
+    var difArr     = macdResult[0];
+    var deaArr     = macdResult[1];
+    var vwapArr    = calcVWAP(recs);
+    var volSMAArr  = calcVolSMA(recs, 20);
+
+    var cur = recs[n - 1];
+
+    var ema9Cur  = ema9Arr[n - 1];
+    var ema21Cur = ema21Arr[n - 1];
+    var rsiCur   = rsiArr[n - 1];
+    var vwapCur  = vwapArr[n - 1];
+    var volSMA   = volSMAArr[n - 1];
+    var difCur   = difArr[n - 1];
+    var deaCur   = deaArr[n - 1];
+
+    if (isNaN(ema9Cur) || isNaN(ema21Cur)) return null;
+    if (isNaN(rsiCur)) return null;
+    if (isNaN(vwapCur) || vwapCur === 0) return null;
+    if (isNaN(volSMA)  || volSMA  === 0) return null;
+    if (isNaN(difCur)  || isNaN(deaCur)) return null;
+
+    // Condition 1 — EMA trend
+    var emaCrossLong  = ema9Cur > ema21Cur;
+    var emaCrossShort = ema9Cur < ema21Cur;
+
+    // Condition 2 — RSI
+    var rsiLong  = (rsiCur >= 40) && (rsiCur <= 65);
+    var rsiShort = (rsiCur >= 35) && (rsiCur <= 60);
+
+    // Condition 3 — VWAP
+    var closeCur  = cur.Close;
+    var vwapLong  = closeCur > vwapCur;
+    var vwapShort = closeCur < vwapCur;
+
+    // Condition 4 — Volume spike (2x average)
+    var volSpike = cur.Volume > (2.0 * volSMA);
+
+    // Condition 5 — MACD position
+    var macdLong  = difCur > deaCur;
+    var macdShort = difCur < deaCur;
+
+    var signal = null;
+    if (emaCrossLong  && rsiLong  && vwapLong  && volSpike && macdLong)  signal = "LONG";
+    if (emaCrossShort && rsiShort && vwapShort && volSpike && macdShort) signal = "SHORT";
+
+    // Market bias filter
+    if (!USE_MARKET_BIAS || signal === null) return signal;
+
+    var bias = getMarketBias();
+    if (bias === "NEUTRAL") return signal;
+    if (bias === "BULL" && signal === "LONG")  return "LONG";
+    if (bias === "BEAR" && signal === "SHORT") return "SHORT";
+    return null;
+}
+
+// =====================================================================
+// Position Helpers
+// =====================================================================
+
+// In backtest: check Amount field — ContractType is "swap" not symbol name
+function isPositionOpen() {
+    try {
+        var positions = exchange.GetPosition();
+        if (!positions || positions.length === 0) return false;
+        for (var i = 0; i < positions.length; i++) {
+            if (Math.abs(positions[i].Amount) > 0) return true;
+        }
+        return false;
+    } catch (e) {
+        return true; // assume open if error
+    }
+}
+
+function getCurrentPrice() {
+    var ticker = exchange.GetTicker();
+    return ticker ? ticker.Last : 0;
+}
+
+function closePositionMarket(dir, size) {
+    try {
+        var price = getCurrentPrice();
+        if (dir === "LONG") {
+            exchange.SetDirection("closebuy");
+            exchange.Sell(price * 0.999, size); // small slippage
+        } else {
+            exchange.SetDirection("closesell");
+            exchange.Buy(price * 1.001, size);
+        }
+        Log("[CLOSE] Market close sent for", dir, "| size:", size);
+    } catch (e) {
+        Log("[ERROR] Close failed:", e.message || e);
+    }
+}
+
+// =====================================================================
+// Trade Execution
+// =====================================================================
+
+function executeTrade(signal) {
+    var dir = signal.direction;
+
+    Log("\n[TRADE] Opening", dir, "on", BACKTEST_SYMBOL);
+
+    // Fetch balance
+    var account = exchange.GetAccount();
+    if (!account) { Log("[ERROR] No account data."); return false; }
+
+    var freeUsdt = account.Balance;
+    if (freeUsdt <= 0) { Log("[WARN] No free balance."); return false; }
+
+    // Current price
+    var ticker = exchange.GetTicker();
+    if (!ticker) { Log("[ERROR] No ticker."); return false; }
+    var entryPrice = ticker.Last;
+
+    // Position size: risk 2% of balance per trade
+    var slPct     = (dir === "LONG") ? (1 - SL_PCT_LONG) : (SL_PCT_SHORT - 1);
+    var maxLoss   = stats.balance * 0.02;
+    var tradeUsdt = maxLoss / (slPct * LEVERAGE);
+    tradeUsdt = Math.min(tradeUsdt, MAX_ORDER_USDT);
+
+    var size = floorTo((tradeUsdt * LEVERAGE) / entryPrice, 3);
+    if (size <= 0) { Log("[ERROR] Size zero."); return false; }
+
+    Log("[SIZE] $" + tradeUsdt.toFixed(2) + " margin | size: " + size + " @ $" + entryPrice.toFixed(4));
+
+    // Place market order
+    try {
+        if (dir === "LONG") {
+            exchange.SetDirection("buy");
+            exchange.Buy(entryPrice * 1.001, size);
+        } else {
+            exchange.SetDirection("sell");
+            exchange.Sell(entryPrice * 0.999, size);
+        }
+    } catch (e) {
+        Log("[ERROR] Order failed:", e.message || e);
+        return false;
+    }
+
+    // TP / SL prices
+    var tpPrice, slPrice;
+    if (dir === "LONG") {
+        tpPrice = entryPrice * TP_PCT_LONG;
+        slPrice = entryPrice * SL_PCT_LONG;
+    } else {
+        tpPrice = entryPrice * TP_PCT_SHORT;
+        slPrice = entryPrice * SL_PCT_SHORT;
+    }
+
+    Log("[TARGETS] TP: $" + tpPrice.toFixed(4) + " | SL: $" + slPrice.toFixed(4));
+
+    currentTrade = {
+        direction:  dir,
+        size:       size,
+        entryPrice: entryPrice,
+        tpPrice:    tpPrice,
+        slPrice:    slPrice,
+        entryTime:  Date.now(),
+        open:       true
+    };
+
+    return true;
+}
+
+// =====================================================================
+// Trade Monitoring
+// =====================================================================
+
+function monitorTrade() {
+    if (!currentTrade) return;
+
+    var dir        = currentTrade.direction;
+    var entryPrice = currentTrade.entryPrice;
+    var tpPrice    = currentTrade.tpPrice;
+    var slPrice    = currentTrade.slPrice;
+    var entryTime  = currentTrade.entryTime;
+    var size       = currentTrade.size;
+    var maxMs      = MAX_TRADE_MINUTES * 60 * 1000;
+
+    var closeReason = "TIMEOUT";
+    var closePrice  = entryPrice;
+
+    Log("[MONITOR]", dir, "| Entry: $" + entryPrice.toFixed(4) +
+        " | TP: $" + tpPrice.toFixed(4) + " | SL: $" + slPrice.toFixed(4));
+
+    while (true) {
+        var elapsed = Date.now() - entryTime;
+
+        // Timeout check
+        if (elapsed >= maxMs) {
+            Log("[TIMEOUT] " + MAX_TRADE_MINUTES + " min reached — closing.");
+            closePositionMarket(dir, size);
+            closePrice  = getCurrentPrice();
+            closeReason = "TIMEOUT";
+            break;
+        }
+
+        var curPrice = getCurrentPrice();
+        if (curPrice <= 0) { Sleep(POSITION_POLL_MS); continue; }
+
+        if (dir === "LONG") {
+            if (curPrice >= tpPrice) {
+                Log("[TP] Price " + curPrice.toFixed(4) + " >= TP " + tpPrice.toFixed(4));
+                closePositionMarket(dir, size);
+                closePrice  = tpPrice;
+                closeReason = "TP";
+                break;
+            }
+            if (curPrice <= slPrice) {
+                Log("[SL] Price " + curPrice.toFixed(4) + " <= SL " + slPrice.toFixed(4));
+                closePositionMarket(dir, size);
+                closePrice  = slPrice;
+                closeReason = "SL";
+                break;
+            }
+        }
+
+        if (dir === "SHORT") {
+            if (curPrice <= tpPrice) {
+                Log("[TP] Price " + curPrice.toFixed(4) + " <= TP " + tpPrice.toFixed(4));
+                closePositionMarket(dir, size);
+                closePrice  = tpPrice;
+                closeReason = "TP";
+                break;
+            }
+            if (curPrice >= slPrice) {
+                Log("[SL] Price " + curPrice.toFixed(4) + " >= SL " + slPrice.toFixed(4));
+                closePositionMarket(dir, size);
+                closePrice  = slPrice;
+                closeReason = "SL";
+                break;
+            }
+        }
+
+        var remaining = maxMs - elapsed;
+        Log("[MONITOR] Price: $" + curPrice.toFixed(4) +
+            " | Remaining: " + Math.floor(remaining / 60000) + "m " +
+            Math.floor((remaining % 60000) / 1000) + "s");
+
+        Sleep(POSITION_POLL_MS);
+    }
+
+    // ─── PnL ───
+    var pnlPct;
+    if (dir === "LONG") {
+        pnlPct = (closePrice - entryPrice) / entryPrice;
+    } else {
+        pnlPct = (entryPrice - closePrice) / entryPrice;
+    }
+    var pnlUsdt = pnlPct * size * entryPrice;
+
+    // Update stats
+    stats.totalTrades += 1;
+    stats.totalPnl    += pnlUsdt;
+    if (closeReason === "TP")      stats.wins     += 1;
+    else if (closeReason === "SL") stats.losses   += 1;
+    else                           stats.timeouts += 1;
+
+    // Update balance from exchange (most accurate in backtest)
+    var accUpd = exchange.GetAccount();
+    if (accUpd) {
+        stats.balance = (accUpd.Balance || 0) + (accUpd.FrozenBalance || 0);
+    } else {
+        stats.balance += pnlUsdt;
+    }
+
+    var sign = pnlUsdt >= 0 ? "+" : "";
+    Log("======================================");
+    Log("[RESULT] Reason  :", closeReason);
+    Log("[RESULT] PnL     :", sign + pnlUsdt.toFixed(4) + " USDT (" + sign + (pnlPct * 100).toFixed(2) + "%)");
+    Log("[RESULT] Balance : $" + stats.balance.toFixed(2));
+    Log("======================================\n");
+
+    LogProfit(stats.balance);
+
+    currentTrade = null;
+}
+
+// =====================================================================
+// Dashboard
+// =====================================================================
+
+function printDashboard() {
+    var total   = stats.totalTrades;
+    var winPct  = total > 0 ? (stats.wins    / total * 100).toFixed(1) : "0.0";
+    var lossPct = total > 0 ? (stats.losses  / total * 100).toFixed(1) : "0.0";
+    var pnlSign = stats.totalPnl >= 0 ? "+" : "";
+    var growthPct = ((stats.balance - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100).toFixed(2);
+
+    Log("+----------------------------------------------+");
+    Log("|    THE SURGEON BOT — BACKTEST RESULTS        |");
+    Log("+----------------------------------------------+");
+    Log("|  Symbol          :", BACKTEST_SYMBOL);
+    Log("|  Initial Capital : $" + INITIAL_CAPITAL.toFixed(2));
+    Log("|  Final Balance   : $" + stats.balance.toFixed(2));
+    Log("|  Net Growth      :", (stats.totalPnl >= 0 ? "+" : "") + growthPct + "%");
+    Log("|  Total PnL       :", pnlSign + "$" + stats.totalPnl.toFixed(2));
+    Log("+----------------------------------------------+");
+    Log("|  Total Trades    :", total);
+    Log("|  Wins            :", stats.wins,    "(" + winPct  + "%)");
+    Log("|  Losses          :", stats.losses,  "(" + lossPct + "%)");
+    Log("|  Timeouts        :", stats.timeouts);
+    Log("+----------------------------------------------+");
+}
+
+// =====================================================================
+// Main Entry Point
+// =====================================================================
+
+function main() {
+    Log("+------------------------------------------------------+");
+    Log("|       THE SURGEON BOT — BACKTEST EDITION            |");
+    Log("+------------------------------------------------------+");
+    Log("|  Symbol     :", BACKTEST_SYMBOL);
+    Log("|  Timeframe  : 15 minutes");
+    Log("|  Leverage   :", LEVERAGE + "x  (set in FMZ backtest config)");
+    Log("|  TP / SL    : +6% / -2%");
+    Log("|  Max Time   :", MAX_TRADE_MINUTES, "minutes per trade");
+    Log("|  Bias Filter:", USE_MARKET_BIAS ? "ON (Daily EMA200)" : "OFF");
+    Log("+------------------------------------------------------+");
+
+    // Set symbol
+    exchange.IO("currency", BACKTEST_SYMBOL);
+    exchange.SetContractType("swap");
+
+    // Read actual starting balance from FMZ backtest engine
+    var account = exchange.GetAccount();
+    if (account) {
+        stats.balance = (account.Balance || 0) + (account.FrozenBalance || 0);
+        if (stats.balance <= 0) stats.balance = INITIAL_CAPITAL;
+    }
+    Log("[BALANCE] Starting balance: $" + stats.balance.toFixed(2));
+
+    // ─── Main loop ───
+    while (true) {
+        // Fetch candles
+        var records = exchange.GetRecords(TIMEFRAME);
+        if (!records || records.length < 50) {
+            Log("[WARN] Not enough candles:", records ? records.length : 0);
+            Sleep(POSITION_POLL_MS);
+            continue;
+        }
+
+        if (!currentTrade) {
+            // Check for signal
+            var signal = checkSignal(records);
+
+            if (signal) {
+                Log("[SIGNAL]", signal, "detected on", BACKTEST_SYMBOL);
+                var success = executeTrade({ symbol: BACKTEST_SYMBOL, direction: signal });
+                if (success) {
+                    monitorTrade();
+                } else {
+                    Log("[WARN] Trade execution failed.");
+                    Sleep(POSITION_POLL_MS);
+                }
+            } else {
+                Sleep(POSITION_POLL_MS);
+            }
+
+        } else {
+            // Unexpected state — resume monitoring
+            Log("[RESUME] Resuming monitor...");
+            monitorTrade();
+        }
+    }
+}
