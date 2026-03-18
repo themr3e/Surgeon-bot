@@ -935,8 +935,16 @@ function main() {
         var h1Result = checkH1Signal(recordsH1, h4Result);
         var price    = getCurrentPrice();
 
-        // ── Print dashboard ─────────────────────────────────────
-        printDashboard(h4Result, h1Result, price, lastH1Candle.Time);
+        // ── Print dashboard — only on signal or open trade ──────
+        // Limits log output to avoid FMZ 8000-line log cap.
+        if (h1Result.signal || currentTrade) {
+            printDashboard(h4Result, h1Result, price, lastH1Candle.Time);
+        } else {
+            Log("[SCAN] No signal | H4:" + h4Result.bias +
+                " | ADX:" + h1Result.adx.toFixed(1) +
+                " | ATR:$" + h1Result.atr.toFixed(2) +
+                " | Flat.");
+        }
 
         // ── Trade logic ─────────────────────────────────────────
         if (!currentTrade) {
