@@ -943,14 +943,6 @@ function monitorTrade() {
             }
         }
 
-        // Safety fallback — position found closed externally
-        if (!isPositionOpen()) {
-            closeReason = "UNKNOWN";
-            closePrice  = curPrice;
-            Log("[CLOSED] Position closed externally — reason UNKNOWN");
-            break;
-        }
-
         // Print trade status
         var remaining = maxMs - elapsed;
         var mins = Math.floor(remaining / 60000);
