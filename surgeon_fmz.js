@@ -34,6 +34,8 @@ var TOP_SYMBOLS_COUNT    = 200;         // Number of top symbols by volume (igno
 var TIMEFRAME            = PERIOD_M5;  // Timeframe (5 minutes)
 var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
 var LEVERAGE             = 10;         // Leverage
+var RISK_PER_TRADE_PCT   = 0.02;       // Risk 2% of balance per trade
+var MAX_ORDER_USDT       = 200;        // Hard cap: never put more than $200 into one trade
 var TP_PCT_LONG          = 1.020;      // Take profit for long  (+2%)
 var TP_PCT_SHORT         = 0.980;      // Take profit for short (-2%)
 var SL_PCT_LONG          = 0.993;      // Stop loss for long    (-0.7%)
@@ -698,8 +700,11 @@ function executeTrade(signal) {
     var priceDec   = symInfo.pricePrecision;
     var amountDec  = getDecimals(stepSize);
 
-    // Calculate position size: (balance x leverage) / price — full compounding
-    var rawSize  = (freeUsdt * LEVERAGE) / entryEstimate;
+    // Calculate position size: risk a fixed % of balance, capped at MAX_ORDER_USDT
+    var tradeUsdt = Math.min(freeUsdt * RISK_PER_TRADE_PCT, MAX_ORDER_USDT);
+    Log("[SIZE] Trade allocation: $" + tradeUsdt.toFixed(2) +
+        " (" + (RISK_PER_TRADE_PCT * 100).toFixed(0) + "% of $" + freeUsdt.toFixed(2) + ")");
+    var rawSize  = (tradeUsdt * LEVERAGE) / entryEstimate;
     var size     = floorTo(rawSize, amountDec);
 
     // Ensure size is not below stepSize
