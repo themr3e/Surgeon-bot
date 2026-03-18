@@ -1,8 +1,8 @@
 /*
-╔══════════════════════════════════════════════════════════════╗
-║          🔪 THE SURGEON BOT — FMZ QUANT EDITION             ║
-║          Binance Futures USDT-M Perpetual Scalping Bot       ║
-╚══════════════════════════════════════════════════════════════╝
++==============================================================+
+|          THE SURGEON BOT -- FMZ QUANT EDITION               |
+|          Binance Futures USDT-M Perpetual Scalping Bot       |
++==============================================================+
 
 Full scalping strategy for Binance USDT-M Perpetual Futures
 Running on FMZ Quant platform (fmz.com)
@@ -131,7 +131,11 @@ function fetchTopSymbols() {
     });
 
     if (!tickers || !Array.isArray(tickers)) {
-        Log("[WARN] Failed to fetch symbol data, using existing list.");
+        Log("[WARN] Failed to fetch symbol data. Response:", JSON.stringify(tickers).slice(0, 200));
+        return activeSymbols.length > 0 ? activeSymbols : [];
+    }
+    if (tickers.length === 0) {
+        Log("[WARN] Symbol data returned empty array.");
         return activeSymbols.length > 0 ? activeSymbols : [];
     }
 
@@ -1008,28 +1012,28 @@ function printDashboard() {
 
     var pnlSign = totalPnl >= 0 ? "+" : "";
 
-    Log("╔══════════════════════════════════════════════╗");
-    Log("║        🔪 THE SURGEON BOT — LIVE             ║");
-    Log("╠══════════════════════════════════════════════╣");
-    Log("║  Balance            : $" + balance.toFixed(2) + " USDT");
-    Log("║  Initial Capital    : $" + INITIAL_CAPITAL.toFixed(2));
-    Log("║  Total PnL          : " + pnlSign + "$" + totalPnl.toFixed(2) +
+    Log("+----------------------------------------------+");
+    Log("|        THE SURGEON BOT -- LIVE               |");
+    Log("+----------------------------------------------+");
+    Log("|  Balance            : $" + balance.toFixed(2) + " USDT");
+    Log("|  Initial Capital    : $" + INITIAL_CAPITAL.toFixed(2));
+    Log("|  Total PnL          : " + pnlSign + "$" + totalPnl.toFixed(2) +
         "  (" + pnlSign + pnlPctTotal.toFixed(2) + "%)");
-    Log("╠══════════════════════════════════════════════╣");
-    Log("║  Total Trades       :", total);
-    Log("║  Wins               :", wins, " (" + winPct.toFixed(1) + "%)");
-    Log("║  Losses             :", losses, " (" + lossPct.toFixed(1) + "%)");
-    Log("║  Timeouts           :", timeouts);
-    Log("╠══════════════════════════════════════════════╣");
-    Log("║  Status             :", status);
-    Log("║  Symbol             :", symDisp);
-    Log("║  Direction          :", dirDisp);
-    Log("║  Entry Price        :", entryDisp);
-    Log("║  Take Profit        :", tpDisp);
-    Log("║  Stop Loss          :", slDisp);
-    Log("║  Time Remaining     :", timeDisp);
-    Log("║  Symbols Watched    :", activeSymbols.length);
-    Log("╚══════════════════════════════════════════════╝");
+    Log("+----------------------------------------------+");
+    Log("|  Total Trades       :", total);
+    Log("|  Wins               :", wins, " (" + winPct.toFixed(1) + "%)");
+    Log("|  Losses             :", losses, " (" + lossPct.toFixed(1) + "%)");
+    Log("|  Timeouts           :", timeouts);
+    Log("+----------------------------------------------+");
+    Log("|  Status             :", status);
+    Log("|  Symbol             :", symDisp);
+    Log("|  Direction          :", dirDisp);
+    Log("|  Entry Price        :", entryDisp);
+    Log("|  Take Profit        :", tpDisp);
+    Log("|  Stop Loss          :", slDisp);
+    Log("|  Time Remaining     :", timeDisp);
+    Log("|  Symbols Watched    :", activeSymbols.length);
+    Log("+----------------------------------------------+");
 }
 
 // =====================================================================
@@ -1038,19 +1042,19 @@ function printDashboard() {
 
  // Print startup banner with configuration info
 function printBanner() {
-    Log("╔══════════════════════════════════════════════════════╗");
-    Log("║          🔪 THE SURGEON BOT — FMZ QUANT             ║");
-    Log("║          Binance Futures Scalping Bot                ║");
-    Log("╠══════════════════════════════════════════════════════╣");
-    Log("║  Platform           : FMZ Quant (fmz.com)");
-    Log("║  Exchange           : Binance USDT-M Futures");
-    Log("║  Initial Capital    : $" + INITIAL_CAPITAL);
-    Log("║  Leverage           : " + LEVERAGE + "x");
-    Log("║  Timeframe          : 5 minutes");
-    Log("║  Target             : +2.0% | Stop Loss: -0.7%");
-    Log("║  Max Trade Duration : " + MAX_TRADE_MINUTES + " minutes");
-    Log("║  Symbols Watched    : " + TOP_SYMBOLS_COUNT);
-    Log("╚══════════════════════════════════════════════════════╝");
+    Log("+------------------------------------------------------+");
+    Log("|          THE SURGEON BOT -- FMZ QUANT               |");
+    Log("|          Binance Futures Scalping Bot                |");
+    Log("+------------------------------------------------------+");
+    Log("|  Platform           : FMZ Quant (fmz.com)");
+    Log("|  Exchange           : Binance USDT-M Futures");
+    Log("|  Initial Capital    : $" + INITIAL_CAPITAL);
+    Log("|  Leverage           : " + LEVERAGE + "x");
+    Log("|  Timeframe          : 5 minutes");
+    Log("|  Target             : +2.0% | Stop Loss: -0.7%");
+    Log("|  Max Trade Duration : " + MAX_TRADE_MINUTES + " minutes");
+    Log("|  Symbols Watched    : " + TOP_SYMBOLS_COUNT);
+    Log("+------------------------------------------------------+");
 }
 
 // =====================================================================
@@ -1082,13 +1086,18 @@ function main() {
         Log("[WARN] Failed to fetch balance — using initial capital: $" + INITIAL_CAPITAL);
     }
 
-    // Load initial symbol list
+    // Load initial symbol list — retry up to 5 times before giving up
     Log("[INIT] Loading symbol list...");
-    activeSymbols      = fetchTopSymbols();
+    for (var initAttempt = 1; initAttempt <= 5; initAttempt++) {
+        activeSymbols = fetchTopSymbols();
+        if (activeSymbols && activeSymbols.length > 0) break;
+        Log("[INIT] Attempt " + initAttempt + "/5 failed — retrying in 10s...");
+        Sleep(10000);
+    }
     symbolsLastUpdated = Date.now();
 
     if (!activeSymbols || activeSymbols.length === 0) {
-        Log("[ERROR] Failed to load symbol list! Check exchange connection.");
+        Log("[ERROR] Failed to load symbol list after 5 attempts! Check exchange connection.");
         return;
     }
 
