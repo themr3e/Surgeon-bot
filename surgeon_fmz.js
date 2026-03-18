@@ -36,6 +36,7 @@ var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
 var LEVERAGE             = 10;         // Leverage
 var RISK_PER_TRADE_PCT   = 0.02;       // Risk 2% of balance per trade
 var MAX_ORDER_USDT       = 200;        // Hard cap: never put more than $200 into one trade
+var SYMBOL_COOLDOWN_MS   = 300000;     // 5 minutes per-symbol cooldown after trading
 var TP_PCT_LONG          = 1.060;      // Take profit for long  (+6%)
 var TP_PCT_SHORT         = 0.940;      // Take profit for short (-6%)
 var SL_PCT_LONG          = 0.980;      // Stop loss for long    (-2%)
@@ -63,6 +64,7 @@ var STABLE_COINS = ["USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD", "USDT"];
 var activeSymbols       = [];    // Active symbol list (FMZ format: "BTC_USDT")
 var symbolsLastUpdated  = 0;     // Timestamp of last symbol list update (ms)
 var currentTrade        = null;  // Current trade data or null if no open trade
+var symbolCooldownMap   = {};    // { "BTC_USDT": timestamp_when_trade_closed }
 
 // Performance statistics
 var stats = {
@@ -427,6 +429,13 @@ function scanSymbols() {
 
     for (var i = 0; i < activeSymbols.length; i++) {
         var fmzSym = activeSymbols[i];
+
+        var symLastTraded = symbolCooldownMap[fmzSym];
+        if (symLastTraded && (Date.now() - symLastTraded) < SYMBOL_COOLDOWN_MS) {
+            skipped++;
+            Sleep(10);
+            continue;
+        }
 
         try {
             // Set symbol in FMZ (currency first, then perpetual swap type)
@@ -1015,6 +1024,7 @@ function monitorTrade() {
     LogProfit(stats.balance);
 
     // Reset trade state
+    symbolCooldownMap[symbol] = Date.now();
     currentTrade = null;
 
     // Print dashboard after each trade
@@ -1086,6 +1096,12 @@ function printDashboard() {
     Log("|  Stop Loss          :", slDisp);
     Log("|  Time Remaining     :", timeDisp);
     Log("|  Symbols Watched    :", activeSymbols.length);
+    var blockedNow = 0;
+    var cdKeys = Object.keys(symbolCooldownMap);
+    for (var ci = 0; ci < cdKeys.length; ci++) {
+        if ((Date.now() - symbolCooldownMap[cdKeys[ci]]) < SYMBOL_COOLDOWN_MS) blockedNow++;
+    }
+    Log("|  Symbols on Cooldown:", blockedNow, "(5min block after trade)");
     Log("+----------------------------------------------+");
 }
 
