@@ -9,7 +9,7 @@ Running on FMZ Quant platform (fmz.com)
 
 Logic:
   - Scan top 200 symbols by 24h trading volume
-  - 5 entry conditions: EMA cross, RSI, VWAP, volume spike, MACD cross
+  - 5 entry conditions: EMA cross, RSI, VWAP, volume spike, MACD position
   - Take Profit: 2% | Stop Loss: 0.7% | Max trade duration: 20 minutes
   - Full compounding of capital
 
@@ -278,7 +278,7 @@ function calcVolSMA(records, period) {
  //   2. RSI(14): 40-65 long, 35-60 short
  //   3. Price above/below VWAP
  //   4. Volume spike > 1.5x average
- //   5. MACD line cross with signal line (last two candles)
+ //   5. MACD line above signal line (LONG) / below signal line (SHORT)
  // Returns: "LONG", "SHORT", or null
 function checkSignal(records) {
     // Need at least 30 candles for reliable calculation
@@ -326,20 +326,16 @@ function checkSignal(records) {
     var vwapCur  = vwapArr[n - 1];
     var volSMA   = volSMAArr[n - 1];
 
-    // MACD values for last 3 candles (to detect cross in last two candles)
+    // MACD values for current candle
     var difCur   = difArr[n - 1];
-    var difPrv   = difArr[n - 2];
-    var difPrv2  = difArr[n - 3];
     var deaCur   = deaArr[n - 1];
-    var deaPrv   = deaArr[n - 2];
-    var deaPrv2  = deaArr[n - 3];
 
     // Validate values
     if (isNaN(ema9Cur) || isNaN(ema9Prv) || isNaN(ema21Cur) || isNaN(ema21Prv)) return null;
     if (isNaN(rsiCur)) return null;
     if (isNaN(vwapCur) || vwapCur === 0) return null;
     if (isNaN(volSMA) || volSMA === 0) return null;
-    if (isNaN(difCur) || isNaN(deaCur) || isNaN(difPrv) || isNaN(deaPrv)) return null;
+    if (isNaN(difCur) || isNaN(deaCur)) return null;
 
     // ─────────────────────────────────────────────
     // 1. EMA9 / EMA21 trend condition (relaxed from exact crossover)
@@ -366,17 +362,10 @@ function checkSignal(records) {
     var volSpike = cur.Volume > (1.2 * volSMA);
 
     // ─────────────────────────────────────────────
-    // 5. MACD cross with signal line (last two candles)
+    // 5. MACD line position relative to signal line
     // ─────────────────────────────────────────────
-    // Bullish cross: DIF crosses above DEA
-    var macdCrossAbove1 = (!isNaN(difPrv2) && !isNaN(deaPrv2)) && (difPrv2 < deaPrv2) && (difPrv > deaPrv);
-    var macdCrossAbove2 = (difPrv < deaPrv) && (difCur > deaCur);
-    var macdCrossLong   = macdCrossAbove1 || macdCrossAbove2;
-
-    // Bearish cross: DIF crosses below DEA
-    var macdCrossBelow1 = (!isNaN(difPrv2) && !isNaN(deaPrv2)) && (difPrv2 > deaPrv2) && (difPrv < deaPrv);
-    var macdCrossBelow2 = (difPrv > deaPrv) && (difCur < deaCur);
-    var macdCrossShort  = macdCrossBelow1 || macdCrossBelow2;
+    var macdCrossLong  = difCur > deaCur; // DIF above DEA = bullish
+    var macdCrossShort = difCur < deaCur; // DIF below DEA = bearish
 
     // ─────────────────────────────────────────────
     // Final signal evaluation — all five conditions must be met
