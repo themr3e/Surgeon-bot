@@ -53,16 +53,6 @@ var TELEGRAM_CHAT_ID    = "8724850558";
 var TELEGRAM_NOTIFY_MS  = 3600000;     // 1 hour in milliseconds
 
 // =====================================================================
-// Testnet Symbol List
-// Binance Futures Testnet only supports a small set of symbols.
-// Used automatically when TESTNET = true.
-// =====================================================================
-var TESTNET_SYMBOLS = [
-    "BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "XRP_USDT",
-    "ADA_USDT", "DOGE_USDT", "LTC_USDT", "LINK_USDT", "DOT_USDT"
-];
-
-// =====================================================================
 // Excluded Stablecoins
 // =====================================================================
 var STABLE_COINS = ["USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD", "USDT"];
@@ -144,10 +134,6 @@ function retryCall(fn, maxRetries, delayMs) {
  // Filter and sort by trading volume, return top TOP_SYMBOLS_COUNT symbols
  // Uses Binance Futures REST API directly via exchange.IO
 function fetchTopSymbols() {
-    if (TESTNET) {
-        Log("[SYMBOLS] Testnet mode — using hardcoded symbol list (" + TESTNET_SYMBOLS.length + " symbols).");
-        return TESTNET_SYMBOLS.slice();
-    }
     Log("[SYMBOLS] Refreshing symbol list...");
 
     var tickers = retryCall(function () {
