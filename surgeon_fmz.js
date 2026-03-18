@@ -1,63 +1,63 @@
 /*
 ╔══════════════════════════════════════════════════════════════╗
 ║          🔪 THE SURGEON BOT — FMZ QUANT EDITION             ║
-║          بوت الجراح — منصة FMZ Quant — عقود بينانس الآجلة  ║
+║          Binance Futures USDT-M Perpetual Scalping Bot       ║
 ╚══════════════════════════════════════════════════════════════╝
 
-استراتيجية سكالبينج كاملة لعقود Binance Futures الدائمة USDT-M
-تعمل على منصة FMZ Quant (fmz.com)
+Full scalping strategy for Binance USDT-M Perpetual Futures
+Running on FMZ Quant platform (fmz.com)
 
-المنطق:
-  - مسح أفضل 200 رمز حسب حجم التداول 24 ساعة
-  - 5 شروط دخول: تقاطع EMA، RSI، VWAP، ارتفاع الحجم، تقاطع MACD
-  - هدف الربح: 2% | وقف الخسارة: 0.7% | الحد الأقصى للصفقة: 20 دقيقة
-  - مضاعفة كاملة للرأسمال (Full Compounding)
+Logic:
+  - Scan top 200 symbols by 24h trading volume
+  - 5 entry conditions: EMA cross, RSI, VWAP, volume spike, MACD cross
+  - Take Profit: 2% | Stop Loss: 0.7% | Max trade duration: 20 minutes
+  - Full compounding of capital
 
-الدوال المستخدمة من FMZ:
-  exchange.GetRecords()      — جلب الشمعات
-  exchange.GetTicker()       — جلب السعر الحالي
-  exchange.SetContractType() — تحديد الرمز
-  exchange.Buy()             — أمر شراء
-  exchange.Sell()            — أمر بيع
-  exchange.GetAccount()      — جلب الرصيد
-  exchange.GetPosition()     — جلب المراكز المفتوحة
-  exchange.IO()              — استدعاء Binance API مباشرة
+FMZ functions used:
+  exchange.GetRecords()      — fetch candles
+  exchange.GetTicker()       — fetch current price
+  exchange.SetContractType() — set symbol
+  exchange.Buy()             — buy order
+  exchange.Sell()            — sell order
+  exchange.GetAccount()      — fetch balance
+  exchange.GetPosition()     — fetch open positions
+  exchange.IO()              — direct Binance API call
 */
 
 // =====================================================================
-// الإعدادات الرئيسية — Main Configuration
-// يمكن تغييرها من لوحة تحكم FMZ عبر معاملات الاستراتيجية
+// Main Configuration
+// Can be changed from FMZ dashboard via strategy parameters
 // =====================================================================
-var INITIAL_CAPITAL      = 500;          // رأس المال الأولي بالدولار
-var TOP_SYMBOLS_COUNT    = 200;          // عدد الرموز الأعلى بحجم التداول
-var TIMEFRAME            = PERIOD_M5;   // الإطار الزمني (5 دقائق)
-var CANDLES_LIMIT        = 201;         // +1 لاستبعاد الشمعة غير المغلقة
-var LEVERAGE             = 10;          // الرافعة المالية
-var TP_PCT_LONG          = 1.020;       // هدف الربح للشراء  (+2%)
-var TP_PCT_SHORT         = 0.980;       // هدف الربح للبيع   (-2%)
-var SL_PCT_LONG          = 0.993;       // وقف الخسارة للشراء (-0.7%)
-var SL_PCT_SHORT         = 1.007;       // وقف الخسارة للبيع  (+0.7%)
-var MAX_TRADE_MINUTES    = 20;          // الحد الأقصى لمدة الصفقة
-var SCAN_INTERVAL_MS     = 30000;       // فاصل المسح بالميلي ثانية (30 ثانية)
-var SYMBOL_DELAY_MS      = 200;         // تأخير بين الرموز لتجنب تجاوز الحد
-var POSITION_POLL_MS     = 10000;       // استطلاع المراكز كل 10 ثوانٍ
-var MIN_BALANCE          = 50;          // الحد الأدنى للرصيد قبل الإيقاف
-var SYMBOL_REFRESH_HOURS = 4;           // تحديث قائمة الرموز كل 4 ساعات
-var DASHBOARD_INTERVAL   = 300000;      // طباعة اللوحة كل 5 دقائق (ms)
+var INITIAL_CAPITAL      = 500;         // Initial capital in USD
+var TOP_SYMBOLS_COUNT    = 200;         // Number of top symbols by volume
+var TIMEFRAME            = PERIOD_M5;  // Timeframe (5 minutes)
+var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
+var LEVERAGE             = 10;         // Leverage
+var TP_PCT_LONG          = 1.020;      // Take profit for long  (+2%)
+var TP_PCT_SHORT         = 0.980;      // Take profit for short (-2%)
+var SL_PCT_LONG          = 0.993;      // Stop loss for long    (-0.7%)
+var SL_PCT_SHORT         = 1.007;      // Stop loss for short   (+0.7%)
+var MAX_TRADE_MINUTES    = 20;         // Max trade duration in minutes
+var SCAN_INTERVAL_MS     = 30000;      // Scan interval in ms (30 seconds)
+var SYMBOL_DELAY_MS      = 200;        // Delay between symbols to avoid rate limit
+var POSITION_POLL_MS     = 10000;      // Poll position every 10 seconds
+var MIN_BALANCE          = 50;         // Minimum balance before stopping
+var SYMBOL_REFRESH_HOURS = 4;          // Refresh symbol list every 4 hours
+var DASHBOARD_INTERVAL   = 300000;     // Print dashboard every 5 minutes (ms)
 
 // =====================================================================
-// العملات المستقرة المستثناة — Excluded Stablecoins
+// Excluded Stablecoins
 // =====================================================================
 var STABLE_COINS = ["USDC", "BUSD", "TUSD", "USDP", "DAI", "FDUSD", "USDT"];
 
 // =====================================================================
-// المتغيرات العالمية — Global State Variables
+// Global State Variables
 // =====================================================================
-var activeSymbols       = [];    // قائمة الرموز النشطة (بصيغة FMZ: "BTC_USDT")
-var symbolsLastUpdated  = 0;     // وقت آخر تحديث لقائمة الرموز (ms)
-var currentTrade        = null;  // بيانات الصفقة الحالية أو null إذا لا توجد صفقة
+var activeSymbols       = [];    // Active symbol list (FMZ format: "BTC_USDT")
+var symbolsLastUpdated  = 0;     // Timestamp of last symbol list update (ms)
+var currentTrade        = null;  // Current trade data or null if no open trade
 
-// إحصائيات الأداء
+// Performance statistics
 var stats = {
     balance:      INITIAL_CAPITAL,
     totalTrades:  0,
@@ -67,36 +67,35 @@ var stats = {
     totalPnl:     0.0
 };
 
-var lastDashboardPrint = 0;   // وقت آخر طباعة للوحة
+var lastDashboardPrint = 0;   // Timestamp of last dashboard print
 
 // =====================================================================
-// تحويل صيغة الرمز — Symbol Format Conversion
-// FMZ تستخدم: "BTC_USDT"  |  Binance API تستخدم: "BTCUSDT"
+// Symbol Format Conversion
+// FMZ uses: "BTC_USDT"  |  Binance API uses: "BTCUSDT"
 // =====================================================================
 
- // تحويل صيغة Binance API إلى صيغة FMZ
- // مثال: "BTCUSDT" -> "BTC_USDT"
+ // Convert Binance API format to FMZ format
+ // Example: "BTCUSDT" -> "BTC_USDT"
 function binanceToFmz(binanceSymbol) {
-    // نزيل "USDT" من النهاية ثم نضيف "_USDT"
     if (binanceSymbol.slice(-4) === "USDT") {
-        var base = binanceSymbol.slice(0, -4); // إزالة آخر 4 أحرف "USDT"
+        var base = binanceSymbol.slice(0, -4); // remove last 4 chars "USDT"
         return base + "_USDT";
     }
     return binanceSymbol;
 }
 
- // تحويل صيغة FMZ إلى صيغة Binance API
- // مثال: "BTC_USDT" -> "BTCUSDT"
+ // Convert FMZ format to Binance API format
+ // Example: "BTC_USDT" -> "BTCUSDT"
 function fmzToBinance(fmzSymbol) {
     return fmzSymbol.replace("_", "");
 }
 
 // =====================================================================
-// استدعاء API مع إعادة المحاولة — API Call with Retry
+// API Call with Retry
 // =====================================================================
 
- // تنفيذ دالة مع إعادة المحاولة 3 مرات عند الفشل
- // يستقبل دالة (fn) وسيتم تنفيذها حتى تنجح أو تستنفذ المحاولات
+ // Execute a function with up to 3 retries on failure
+ // Accepts a function (fn) and runs it until success or retries exhausted
 function retryCall(fn, maxRetries, delayMs) {
     maxRetries = maxRetries || 3;
     delayMs    = delayMs    || 2000;
@@ -108,7 +107,7 @@ function retryCall(fn, maxRetries, delayMs) {
                 return result;
             }
         } catch (e) {
-            Log("[تحذير] محاولة", attempt, "/", maxRetries, "فشلت:", e.message || e);
+            Log("[WARN] Attempt", attempt, "/", maxRetries, "failed:", e.message || e);
         }
         if (attempt < maxRetries) {
             Sleep(delayMs);
@@ -118,40 +117,39 @@ function retryCall(fn, maxRetries, delayMs) {
 }
 
 // =====================================================================
-// جلب أفضل 200 رمز حسب الحجم — Fetch Top 200 Symbols by Volume
+// Fetch Top 200 Symbols by Volume
 // =====================================================================
 
- // جلب بيانات 24 ساعة لجميع رموز Binance Futures
- // ثم تصفية وترتيب حسب حجم التداول، وإعادة أعلى TOP_SYMBOLS_COUNT رمزاً
- // يستخدم Binance Futures REST API مباشرة عبر exchange.IO
+ // Fetch 24h data for all Binance Futures symbols
+ // Filter and sort by trading volume, return top TOP_SYMBOLS_COUNT symbols
+ // Uses Binance Futures REST API directly via exchange.IO
 function fetchTopSymbols() {
-    Log("[رموز] جاري تحديث قائمة الرموز...");
+    Log("[SYMBOLS] Refreshing symbol list...");
 
     var tickers = retryCall(function () {
-        // جلب بيانات الـ 24 ساعة من Binance Futures
         return exchange.IO("api", "GET", "/fapi/v1/ticker/24hr");
     });
 
     if (!tickers || !Array.isArray(tickers)) {
-        Log("[تحذير] فشل جلب بيانات الرموز، ستُستخدم القائمة القديمة.");
+        Log("[WARN] Failed to fetch symbol data, using existing list.");
         return activeSymbols.length > 0 ? activeSymbols : [];
     }
 
-    // تصفية الرموز: USDT فقط، ليست عملات مستقرة، عقود دائمة
+    // Filter: USDT pairs only, exclude stablecoins, perpetual contracts
     var futures = [];
     for (var i = 0; i < tickers.length; i++) {
         var t = tickers[i];
-        var sym = t.symbol; // مثال: "BTCUSDT"
+        var sym = t.symbol; // e.g. "BTCUSDT"
 
-        // فقط رموز تنتهي بـ USDT
+        // Only symbols ending in USDT
         if (!sym || sym.slice(-4) !== "USDT") {
             continue;
         }
 
-        // استخراج الرمز الأساسي
+        // Extract base currency
         var base = sym.slice(0, -4);
 
-        // استثناء العملات المستقرة
+        // Exclude stablecoins
         var isStable = false;
         for (var s = 0; s < STABLE_COINS.length; s++) {
             if (base === STABLE_COINS[s]) {
@@ -163,27 +161,27 @@ function fetchTopSymbols() {
 
         var quoteVolume = parseFloat(t.quoteVolume) || 0;
         futures.push({
-            symbol:      binanceToFmz(sym), // تحويل لصيغة FMZ
+            symbol:      binanceToFmz(sym), // convert to FMZ format
             binanceSym:  sym,
             volume:      quoteVolume
         });
     }
 
-    // ترتيب تنازلي حسب حجم التداول
+    // Sort descending by trading volume
     futures.sort(function (a, b) { return b.volume - a.volume; });
 
-    // أخذ أفضل TOP_SYMBOLS_COUNT رمز
+    // Take top TOP_SYMBOLS_COUNT symbols
     var top = [];
     var limit = Math.min(TOP_SYMBOLS_COUNT, futures.length);
     for (var j = 0; j < limit; j++) {
         top.push(futures[j].symbol);
     }
 
-    Log("[رموز] تم تحميل", top.length, "رمزاً بنجاح.");
+    Log("[SYMBOLS] Loaded", top.length, "symbols successfully.");
     return top;
 }
 
- // تحديث قائمة الرموز إذا مضى أكثر من SYMBOL_REFRESH_HOURS ساعات
+ // Refresh symbol list if more than SYMBOL_REFRESH_HOURS have passed
 function maybeRefreshSymbols() {
     var now = Date.now();
     if (now - symbolsLastUpdated >= SYMBOL_REFRESH_HOURS * 3600 * 1000) {
@@ -196,29 +194,28 @@ function maybeRefreshSymbols() {
 }
 
 // =====================================================================
-// حساب المؤشرات التقنية — Technical Indicators
+// Technical Indicators
 // =====================================================================
 
- // حساب VWAP يدوياً (FMZ لا تتضمن VWAP في مكتبة TA)
- // VWAP = Σ(TypicalPrice × Volume) / Σ(Volume)
- // السعر النموذجي = (High + Low + Close) / 3
- // نحسب VWAP تراكمياً على كامل مجموعة البيانات (كل يوم)
+ // Calculate VWAP manually (FMZ TA library does not include VWAP)
+ // VWAP = Sum(TypicalPrice x Volume) / Sum(Volume)
+ // Typical price = (High + Low + Close) / 3
+ // Calculated cumulatively, reset each UTC day
 function calcVWAP(records) {
     var vwapArr = [];
-    var cumTPV  = 0; // تراكم (السعر النموذجي × الحجم)
-    var cumVol  = 0; // تراكم الحجم
+    var cumTPV  = 0; // cumulative (typical price x volume)
+    var cumVol  = 0; // cumulative volume
 
-    // تحديد بداية اليوم الأول لإعادة ضبط التراكم يومياً
     var dayStart = -1;
 
     for (var i = 0; i < records.length; i++) {
         var r  = records[i];
-        var tp = (r.High + r.Low + r.Close) / 3; // السعر النموذجي
+        var tp = (r.High + r.Low + r.Close) / 3; // typical price
 
-        // استخراج اليوم من الطابع الزمني (Unix ms -> UTC day)
+        // Extract UTC day from timestamp (Unix ms -> UTC day)
         var day = Math.floor(r.Time / 86400000);
 
-        // إعادة ضبط التراكم عند بداية يوم جديد
+        // Reset cumulative values at start of new day
         if (day !== dayStart) {
             cumTPV   = 0;
             cumVol   = 0;
@@ -231,10 +228,10 @@ function calcVWAP(records) {
         vwapArr.push(cumVol > 0 ? cumTPV / cumVol : tp);
     }
 
-    return vwapArr; // مصفوفة بنفس حجم records
+    return vwapArr; // array same length as records
 }
 
- // حساب متوسط متحرك بسيط للحجم (SMA 20)
+ // Calculate simple moving average of volume (SMA 20)
 function calcVolSMA(records, period) {
     var result = [];
     for (var i = 0; i < records.length; i++) {
@@ -252,50 +249,50 @@ function calcVolSMA(records, period) {
 }
 
 // =====================================================================
-// فحص شروط الإشارة الخمسة — Five-Condition Signal Check
+// Five-Condition Signal Check
 // =====================================================================
 
- // فحص الشروط الخمسة على مجموعة الشمعات المغلقة:
- //   1. تقاطع EMA9 مع EMA21
- //   2. RSI(14) في النطاق المحدد
- //   3. السعر فوق/تحت VWAP
- //   4. ارتفاع الحجم أكثر من 1.5× المتوسط
- //   5. تقاطع خط MACD مع خط الإشارة (في آخر شمعتين)
- // يُعيد: "LONG" أو "SHORT" أو null
+ // Check five conditions on closed candles:
+ //   1. EMA9 / EMA21 crossover
+ //   2. RSI(14) within range
+ //   3. Price above/below VWAP
+ //   4. Volume spike > 1.5x average
+ //   5. MACD line cross with signal line (last two candles)
+ // Returns: "LONG", "SHORT", or null
 function checkSignal(records) {
-    // نحتاج على الأقل 30 شمعة للحساب الموثوق
+    // Need at least 30 candles for reliable calculation
     if (!records || records.length < 30) return null;
 
-    // استبعاد الشمعة الأخيرة (غير مغلقة بعد) — آخر عنصر
+    // Exclude last candle (not yet closed)
     var recs = records.slice(0, records.length - 1);
     var n    = recs.length;
     if (n < 30) return null;
 
     // ─────────────────────────────────────────────
-    // حساب المؤشرات باستخدام مكتبة TA المدمجة في FMZ
+    // Calculate indicators using FMZ built-in TA library
     // ─────────────────────────────────────────────
 
-    // EMA 9 و EMA 21
+    // EMA 9 and EMA 21
     var ema9Arr  = TA.EMA(recs, 9);
     var ema21Arr = TA.EMA(recs, 21);
 
     // RSI 14
     var rsiArr = TA.RSI(recs, 14);
 
-    // MACD (12, 26, 9) — FMZ يُعيد [DIF[], DEA[], MACD[]]
+    // MACD (12, 26, 9) — FMZ returns [DIF[], DEA[], MACD[]]
     var macdResult = TA.MACD(recs, 12, 26, 9);
-    var difArr  = macdResult[0]; // خط MACD الرئيسي (DIF)
-    var deaArr  = macdResult[1]; // خط الإشارة (DEA / Signal)
+    var difArr  = macdResult[0]; // MACD main line (DIF)
+    var deaArr  = macdResult[1]; // Signal line (DEA)
 
-    // VWAP (محسوب يدوياً)
+    // VWAP (calculated manually)
     var vwapArr = calcVWAP(recs);
 
-    // متوسط الحجم SMA20
+    // Volume SMA20
     var volSMAArr = calcVolSMA(recs, 20);
 
     // ─────────────────────────────────────────────
-    // قراءة القيم من الشمعتين الأخيرتين
-    // cur = آخر شمعة مغلقة | prv = الشمعة قبلها
+    // Read values from last two closed candles
+    // cur = last closed candle | prv = candle before it
     // ─────────────────────────────────────────────
     var cur = recs[n - 1];
     var prv = recs[n - 2];
@@ -308,7 +305,7 @@ function checkSignal(records) {
     var vwapCur  = vwapArr[n - 1];
     var volSMA   = volSMAArr[n - 1];
 
-    // قيم MACD لـ 3 شمعات أخيرة (للكشف عن التقاطع في آخر شمعتين)
+    // MACD values for last 3 candles (to detect cross in last two candles)
     var difCur   = difArr[n - 1];
     var difPrv   = difArr[n - 2];
     var difPrv2  = difArr[n - 3];
@@ -316,7 +313,7 @@ function checkSignal(records) {
     var deaPrv   = deaArr[n - 2];
     var deaPrv2  = deaArr[n - 3];
 
-    // التحقق من صحة القيم
+    // Validate values
     if (isNaN(ema9Cur) || isNaN(ema9Prv) || isNaN(ema21Cur) || isNaN(ema21Prv)) return null;
     if (isNaN(rsiCur)) return null;
     if (isNaN(vwapCur) || vwapCur === 0) return null;
@@ -324,44 +321,44 @@ function checkSignal(records) {
     if (isNaN(difCur) || isNaN(deaCur) || isNaN(difPrv) || isNaN(deaPrv)) return null;
 
     // ─────────────────────────────────────────────
-    // 1. شرط تقاطع EMA9 مع EMA21
+    // 1. EMA9 / EMA21 crossover condition
     // ─────────────────────────────────────────────
-    var emaCrossLong  = (ema9Prv < ema21Prv) && (ema9Cur > ema21Cur); // تقاطع صعودي
-    var emaCrossShort = (ema9Prv > ema21Prv) && (ema9Cur < ema21Cur); // تقاطع هبوطي
+    var emaCrossLong  = (ema9Prv < ema21Prv) && (ema9Cur > ema21Cur); // bullish cross
+    var emaCrossShort = (ema9Prv > ema21Prv) && (ema9Cur < ema21Cur); // bearish cross
 
     // ─────────────────────────────────────────────
-    // 2. شرط RSI(14): نطاق 45-60 للشراء، 40-55 للبيع
+    // 2. RSI(14) condition: 45-60 for long, 40-55 for short
     // ─────────────────────────────────────────────
     var rsiLong  = (rsiCur >= 45) && (rsiCur <= 60);
     var rsiShort = (rsiCur >= 40) && (rsiCur <= 55);
 
     // ─────────────────────────────────────────────
-    // 3. شرط VWAP: السعر فوق VWAP للشراء، تحته للبيع
+    // 3. VWAP condition: price above VWAP for long, below for short
     // ─────────────────────────────────────────────
     var closeCur   = cur.Close;
     var vwapLong   = closeCur > vwapCur;
     var vwapShort  = closeCur < vwapCur;
 
     // ─────────────────────────────────────────────
-    // 4. شرط ارتفاع الحجم: أكبر من 1.5× المتوسط
+    // 4. Volume spike condition: > 1.5x average
     // ─────────────────────────────────────────────
     var volSpike = cur.Volume > (1.5 * volSMA);
 
     // ─────────────────────────────────────────────
-    // 5. شرط تقاطع MACD مع خط الإشارة (في آخر شمعتين)
+    // 5. MACD cross with signal line (last two candles)
     // ─────────────────────────────────────────────
-    // تقاطع صعودي: DIF يعبر فوق DEA
+    // Bullish cross: DIF crosses above DEA
     var macdCrossAbove1 = (!isNaN(difPrv2) && !isNaN(deaPrv2)) && (difPrv2 < deaPrv2) && (difPrv > deaPrv);
     var macdCrossAbove2 = (difPrv < deaPrv) && (difCur > deaCur);
     var macdCrossLong   = macdCrossAbove1 || macdCrossAbove2;
 
-    // تقاطع هبوطي: DIF يعبر تحت DEA
+    // Bearish cross: DIF crosses below DEA
     var macdCrossBelow1 = (!isNaN(difPrv2) && !isNaN(deaPrv2)) && (difPrv2 > deaPrv2) && (difPrv < deaPrv);
     var macdCrossBelow2 = (difPrv > deaPrv) && (difCur < deaCur);
     var macdCrossShort  = macdCrossBelow1 || macdCrossBelow2;
 
     // ─────────────────────────────────────────────
-    // تقييم الإشارة النهائية — يجب تحقق جميع الشروط الخمسة
+    // Final signal evaluation — all five conditions must be met
     // ─────────────────────────────────────────────
     if (emaCrossLong && rsiLong && vwapLong && volSpike && macdCrossLong) {
         return "LONG";
@@ -373,40 +370,40 @@ function checkSignal(records) {
 }
 
 // =====================================================================
-// دورة مسح الرموز — Symbol Scanning Cycle
+// Symbol Scanning Cycle
 // =====================================================================
 
- // مسح جميع الرموز النشطة للبحث عن إشارات صالحة
- // يُعيد: كائن الإشارة الأفضل (الأعلى حجماً) أو null إذا لا توجد إشارات
+ // Scan all active symbols for valid signals
+ // Returns: best signal object (highest volume) or null if none found
 function scanSymbols() {
     var now = new Date();
-    Log("\n[مسح] بدء مسح", activeSymbols.length, "رمزاً...",
+    Log("\n[SCAN] Scanning", activeSymbols.length, "symbols...",
         now.getUTCHours() + ":" + now.getUTCMinutes() + " UTC");
 
-    var candidates = []; // قائمة الإشارات المحتملة
+    var candidates = []; // list of candidate signals
 
     for (var i = 0; i < activeSymbols.length; i++) {
         var fmzSym = activeSymbols[i];
 
         try {
-            // تحديد الرمز في FMZ
+            // Set symbol in FMZ
             exchange.SetContractType(fmzSym);
 
-            // جلب الشمعات (الحد + 1 لاستبعاد الشمعة الحالية غير المغلقة)
+            // Fetch candles
             var records = exchange.GetRecords(TIMEFRAME);
             if (!records || records.length < 50) {
                 Sleep(SYMBOL_DELAY_MS);
                 continue;
             }
 
-            // تحليل الإشارة
+            // Analyze signal
             var signal = checkSignal(records);
 
             if (signal) {
-                // جلب حجم التداول من المؤشر الحالي
+                // Fetch volume from current ticker
                 var ticker = exchange.GetTicker();
                 var vol    = ticker ? (ticker.Volume || 0) : 0;
-                var price  = records[records.length - 2].Close; // آخر شمعة مغلقة
+                var price  = records[records.length - 2].Close; // last closed candle
 
                 candidates.push({
                     symbol:    fmzSym,
@@ -415,13 +412,13 @@ function scanSymbols() {
                     price:     price
                 });
 
-                Log("[إشارة]", fmzSym, "→", signal,
-                    "| حجم:", vol.toFixed(0));
+                Log("[SIGNAL]", fmzSym, "->", signal,
+                    "| vol:", vol.toFixed(0));
             }
 
         } catch (e) {
-            // تجاهل الرموز التي تُسبب خطأ (ربما غير متوفرة)
-            // Log("[تحذير] خطأ في", fmzSym, ":", e.message);
+            // Skip symbols that cause errors (may not be available)
+            // Log("[WARN] Error on", fmzSym, ":", e.message);
         }
 
         Sleep(SYMBOL_DELAY_MS);
@@ -431,7 +428,7 @@ function scanSymbols() {
         return null;
     }
 
-    // اختيار الإشارة ذات أعلى حجم تداول
+    // Select signal with highest trading volume
     var best = candidates[0];
     for (var k = 1; k < candidates.length; k++) {
         if (candidates[k].volume > best.volume) {
@@ -439,23 +436,23 @@ function scanSymbols() {
         }
     }
 
-    Log("[اختيار] أفضل إشارة:", best.symbol, best.direction);
+    Log("[SELECT] Best signal:", best.symbol, best.direction);
     return best;
 }
 
 // =====================================================================
-// الحصول على دقة الكمية — Get Amount Precision
+// Get Amount Precision
 // =====================================================================
 
- // تقريب القيمة للأسفل بعدد المنازل العشرية المحددة
- // لتجنب رفض الأمر بسبب الدقة الزائدة
+ // Round value down to specified decimal places
+ // Prevents order rejection due to excess precision
 function floorTo(value, decimals) {
     var factor = Math.pow(10, decimals);
     return Math.floor(value * factor) / factor;
 }
 
- // الحصول على الحد الأدنى للكمية والخطوة من Binance Futures
- // يستخدم /fapi/v1/exchangeInfo
+ // Get minimum quantity and step size from Binance Futures
+ // Uses /fapi/v1/exchangeInfo
 function getSymbolStepSize(binanceSym) {
     try {
         var info = exchange.IO("api", "GET", "/fapi/v1/exchangeInfo");
@@ -467,7 +464,7 @@ function getSymbolStepSize(binanceSym) {
                 var stepSize       = 0.001;
                 var pricePrecision = s.pricePrecision || 2;
 
-                // البحث في فلاتر الرمز عن LOT_SIZE
+                // Search symbol filters for LOT_SIZE
                 if (s.filters) {
                     for (var j = 0; j < s.filters.length; j++) {
                         if (s.filters[j].filterType === "LOT_SIZE") {
@@ -480,13 +477,13 @@ function getSymbolStepSize(binanceSym) {
             }
         }
     } catch (e) {
-        Log("[تحذير] فشل جلب معلومات الرمز:", e.message);
+        Log("[WARN] Failed to fetch symbol info:", e.message);
     }
     return { stepSize: 0.001, pricePrecision: 2 };
 }
 
- // حساب عدد المنازل العشرية من قيمة stepSize
- // مثال: 0.001 -> 3 | 0.01 -> 2 | 1 -> 0
+ // Calculate decimal places from stepSize value
+ // Example: 0.001 -> 3 | 0.01 -> 2 | 1 -> 0
 function getDecimals(stepSize) {
     if (stepSize >= 1) return 0;
     var s = stepSize.toString();
@@ -496,11 +493,11 @@ function getDecimals(stepSize) {
 }
 
 // =====================================================================
-// وضع أوامر TP و SL عبر Binance API — Place TP/SL Orders via API
+// Place TP/SL Orders via Binance API
 // =====================================================================
 
- // وضع أمر TAKE_PROFIT_MARKET عبر Binance Futures API مباشرة
- // يُعيد معرف الأمر أو null عند الفشل
+ // Place TAKE_PROFIT_MARKET order via Binance Futures API
+ // Returns order ID or null on failure
 function placeTakeProfitOrder(binanceSym, side, stopPrice) {
     try {
         var result = exchange.IO("api", "POST", "/fapi/v1/order",
@@ -513,18 +510,18 @@ function placeTakeProfitOrder(binanceSym, side, stopPrice) {
             "&timeInForce=GTE_GTC"
         );
         if (result && result.orderId) {
-            Log("[TP] تم وضع أمر Take Profit: #" + result.orderId +
-                " عند $" + stopPrice);
+            Log("[TP] Take Profit order placed: #" + result.orderId +
+                " at $" + stopPrice);
             return result.orderId;
         }
     } catch (e) {
-        Log("[خطأ] فشل وضع TP:", e.message || e);
+        Log("[ERROR] Failed to place TP:", e.message || e);
     }
     return null;
 }
 
- // وضع أمر STOP_MARKET عبر Binance Futures API مباشرة
- // يُعيد معرف الأمر أو null عند الفشل
+ // Place STOP_MARKET order via Binance Futures API
+ // Returns order ID or null on failure
 function placeStopLossOrder(binanceSym, side, stopPrice) {
     try {
         var result = exchange.IO("api", "POST", "/fapi/v1/order",
@@ -537,30 +534,30 @@ function placeStopLossOrder(binanceSym, side, stopPrice) {
             "&timeInForce=GTE_GTC"
         );
         if (result && result.orderId) {
-            Log("[SL] تم وضع أمر Stop Loss: #" + result.orderId +
-                " عند $" + stopPrice);
+            Log("[SL] Stop Loss order placed: #" + result.orderId +
+                " at $" + stopPrice);
             return result.orderId;
         }
     } catch (e) {
-        Log("[خطأ] فشل وضع SL:", e.message || e);
+        Log("[ERROR] Failed to place SL:", e.message || e);
     }
     return null;
 }
 
- // إلغاء أمر محدد عبر Binance Futures API
+ // Cancel a specific order via Binance Futures API
 function cancelOrderById(binanceSym, orderId) {
     if (!orderId) return;
     try {
         exchange.IO("api", "DELETE", "/fapi/v1/order",
             "symbol=" + binanceSym + "&orderId=" + orderId
         );
-        Log("[إلغاء] تم إلغاء الأمر #" + orderId);
+        Log("[CANCEL] Order #" + orderId + " cancelled.");
     } catch (e) {
-        Log("[تحذير] فشل إلغاء الأمر #" + orderId + ":", e.message || e);
+        Log("[WARN] Failed to cancel order #" + orderId + ":", e.message || e);
     }
 }
 
- // إلغاء أوامر TP و SL المعلقة للصفقة الحالية
+ // Cancel pending TP and SL orders for the current trade
 function cancelTpSl() {
     if (!currentTrade) return;
     var binSym = fmzToBinance(currentTrade.symbol);
@@ -571,11 +568,11 @@ function cancelTpSl() {
 }
 
 // =====================================================================
-// تعيين الرافعة المالية — Set Leverage
+// Set Leverage
 // =====================================================================
 
- // تعيين الرافعة المالية لرمز معين عبر Binance API
- // يُعيد true عند النجاح، false عند الفشل
+ // Set leverage for a symbol via Binance API
+ // Returns true on success, false on failure
 function setLeverage(binanceSym, leverage) {
     try {
         exchange.IO("api", "POST", "/fapi/v1/leverage",
@@ -583,55 +580,55 @@ function setLeverage(binanceSym, leverage) {
         );
         return true;
     } catch (e) {
-        Log("[تحذير] فشل تعيين الرافعة لـ", binanceSym, ":", e.message || e);
+        Log("[WARN] Failed to set leverage for", binanceSym, ":", e.message || e);
         return false;
     }
 }
 
- // تعيين وضع الهامش المعزول (Isolated) لرمز معين
+ // Set isolated margin mode for a symbol
 function setIsolatedMargin(binanceSym) {
     try {
         exchange.IO("api", "POST", "/fapi/v1/marginType",
             "symbol=" + binanceSym + "&marginType=ISOLATED"
         );
     } catch (e) {
-        // بعض الأخطاء طبيعية إذا كان الوضع محدداً مسبقاً
+        // Some errors are expected if mode is already set
         var msg = e.message || e.toString();
         if (msg.indexOf("already") === -1 && msg.indexOf("No need") === -1) {
-            Log("[تحذير] نوع الهامش:", msg);
+            Log("[WARN] Margin type:", msg);
         }
     }
 }
 
 // =====================================================================
-// تنفيذ الصفقة — Trade Execution
+// Trade Execution
 // =====================================================================
 
- // تنفيذ الصفقة كاملةً:
- //   1. تعيين الرافعة ونوع الهامش
- //   2. جلب الرصيد وحساب حجم المركز (مضاعفة كاملة)
- //   3. تنفيذ أمر سوق
- //   4. وضع أوامر TP و SL
- // يُعيد true عند النجاح، false عند الفشل
+ // Execute a full trade:
+ //   1. Set leverage and margin type
+ //   2. Fetch balance and calculate position size (full compounding)
+ //   3. Execute market order
+ //   4. Place TP and SL orders
+ // Returns true on success, false on failure
 function executeTrade(signal) {
     var fmzSym  = signal.symbol;
-    var dir     = signal.direction; // "LONG" أو "SHORT"
+    var dir     = signal.direction; // "LONG" or "SHORT"
     var binSym  = fmzToBinance(fmzSym);
 
-    Log("\n[تنفيذ] بدء تنفيذ صفقة", dir, "على", fmzSym);
+    Log("\n[TRADE] Opening", dir, "on", fmzSym);
 
     // ────────────────────────────────────────
-    // 1. تعيين الرمز في FMZ
+    // 1. Set symbol in FMZ
     // ────────────────────────────────────────
     try {
         exchange.SetContractType(fmzSym);
     } catch (e) {
-        Log("[خطأ] فشل تعيين الرمز:", fmzSym, e.message);
+        Log("[ERROR] Failed to set contract:", fmzSym, e.message);
         return false;
     }
 
     // ────────────────────────────────────────
-    // 2. تعيين الرافعة ونوع الهامش
+    // 2. Set leverage and margin type
     // ────────────────────────────────────────
     if (!setLeverage(binSym, LEVERAGE)) {
         return false;
@@ -639,79 +636,79 @@ function executeTrade(signal) {
     setIsolatedMargin(binSym);
 
     // ────────────────────────────────────────
-    // 3. جلب الرصيد المتاح
+    // 3. Fetch available balance
     // ────────────────────────────────────────
     var account = retryCall(function () { return exchange.GetAccount(); });
     if (!account) {
-        Log("[خطأ] فشل جلب الرصيد.");
+        Log("[ERROR] Failed to fetch balance.");
         return false;
     }
 
-    // في FMZ للعقود الآجلة: Balance = الرصيد المتاح بالـ USDT
+    // In FMZ futures: Balance = available USDT balance
     var freeUsdt = account.Balance;
     if (freeUsdt < MIN_BALANCE) {
-        Log("[تحذير حرج] الرصيد $" + freeUsdt.toFixed(2) +
-            " أقل من الحد الأدنى $" + MIN_BALANCE + "!");
+        Log("[WARN] Balance $" + freeUsdt.toFixed(2) +
+            " below minimum $" + MIN_BALANCE + "!");
         return false;
     }
 
     // ────────────────────────────────────────
-    // 4. جلب السعر الحالي وحساب الحجم
+    // 4. Fetch current price and calculate size
     // ────────────────────────────────────────
     var ticker = retryCall(function () { return exchange.GetTicker(); });
     if (!ticker) {
-        Log("[خطأ] فشل جلب السعر.");
+        Log("[ERROR] Failed to fetch price.");
         return false;
     }
     var entryEstimate = ticker.Last;
 
-    // جلب معلومات دقة الرمز
+    // Fetch symbol precision info
     var symInfo    = getSymbolStepSize(binSym);
     var stepSize   = symInfo.stepSize;
     var priceDec   = symInfo.pricePrecision;
     var amountDec  = getDecimals(stepSize);
 
-    // حساب حجم المركز: (الرصيد × الرافعة) / السعر — مضاعفة كاملة
+    // Calculate position size: (balance x leverage) / price — full compounding
     var rawSize  = (freeUsdt * LEVERAGE) / entryEstimate;
     var size     = floorTo(rawSize, amountDec);
 
-    // تأكد أن الحجم لا يقل عن stepSize
+    // Ensure size is not below stepSize
     if (size < stepSize || size <= 0) {
-        Log("[خطأ] حجم المركز صفر أو أقل من الحد الأدنى:", size, "| stepSize:", stepSize);
+        Log("[ERROR] Position size zero or below minimum:", size, "| stepSize:", stepSize);
         return false;
     }
 
-    Log("[حجم] الرصيد: $" + freeUsdt.toFixed(2) +
-        " | حجم المركز: " + size + " @ ~$" + entryEstimate.toFixed(4));
+    Log("[SIZE] Balance: $" + freeUsdt.toFixed(2) +
+        " | Size: " + size + " @ ~$" + entryEstimate.toFixed(4));
 
     // ────────────────────────────────────────
-    // 5. تنفيذ أمر السوق عبر FMZ
+    // 5. Execute market order via FMZ
     // ────────────────────────────────────────
     var orderId = null;
     try {
         if (dir === "LONG") {
-            // فتح مركز شراء (Long)
+            // Open long position
             exchange.SetDirection("buy");
-            orderId = exchange.Buy(-1, size); // -1 = أمر سوق
+            orderId = exchange.Buy(-1, size); // -1 = market order
         } else {
-            // فتح مركز بيع (Short)
+            // Open short position
             exchange.SetDirection("sell");
-            orderId = exchange.Sell(-1, size); // -1 = أمر سوق
+            orderId = exchange.Sell(-1, size); // -1 = market order
         }
     } catch (e) {
-        Log("[خطأ] فشل تنفيذ أمر السوق:", e.message || e);
+        Log("[ERROR] Failed to execute market order:", e.message || e);
         return false;
     }
 
     if (!orderId) {
-        Log("[خطأ] لم يُعاد معرف الأمر — الأمر فشل.");
+        Log("[ERROR] No order ID returned — order failed.");
         return false;
     }
 
-    // انتظار ثانية للحصول على سعر التنفيذ الفعلي
+    // Wait 1 second to get actual fill price
     Sleep(1000);
 
-    // جلب سعر التنفيذ الفعلي
+    // Fetch actual fill price
     var fillPrice = entryEstimate;
     try {
         var orderInfo = exchange.GetOrder(orderId);
@@ -721,13 +718,13 @@ function executeTrade(signal) {
             fillPrice = orderInfo.Price;
         }
     } catch (e) {
-        Log("[تحذير] استخدام السعر التقديري: $" + fillPrice.toFixed(6));
+        Log("[WARN] Using estimated price: $" + fillPrice.toFixed(6));
     }
 
-    Log("[تنفيذ] تم التنفيذ بسعر: $" + fillPrice.toFixed(6));
+    Log("[FILL] Filled at: $" + fillPrice.toFixed(6));
 
     // ────────────────────────────────────────
-    // 6. حساب أسعار TP و SL
+    // 6. Calculate TP and SL prices
     // ────────────────────────────────────────
     var tpPrice, slPrice;
     var priceFactor = Math.pow(10, priceDec);
@@ -740,11 +737,11 @@ function executeTrade(signal) {
         slPrice = Math.round(fillPrice * SL_PCT_SHORT * priceFactor) / priceFactor;
     }
 
-    Log("[أهداف] TP: $" + tpPrice.toFixed(priceDec) +
+    Log("[TARGETS] TP: $" + tpPrice.toFixed(priceDec) +
         " | SL: $" + slPrice.toFixed(priceDec));
 
     // ────────────────────────────────────────
-    // 7. وضع أوامر TP و SL عبر Binance API
+    // 7. Place TP and SL orders via Binance API
     // ────────────────────────────────────────
     var closeSide = (dir === "LONG") ? "SELL" : "BUY";
 
@@ -752,7 +749,7 @@ function executeTrade(signal) {
     var slOrderId = placeStopLossOrder  (binSym, closeSide, slPrice.toFixed(priceDec));
 
     // ────────────────────────────────────────
-    // 8. حفظ معلومات الصفقة في المتغير العالمي
+    // 8. Save trade info to global variable
     // ────────────────────────────────────────
     currentTrade = {
         symbol:     fmzSym,
@@ -771,11 +768,11 @@ function executeTrade(signal) {
 }
 
 // =====================================================================
-// فحص حالة المركز — Check Position Status
+// Check Position Status
 // =====================================================================
 
- // التحقق من أن المركز لا يزال مفتوحاً
- // يُعيد true إذا كان المركز مفتوحاً، false إذا أُغلق
+ // Check whether the position is still open
+ // Returns true if open, false if closed
 function isPositionOpen() {
     try {
         var positions = exchange.GetPosition();
@@ -784,25 +781,25 @@ function isPositionOpen() {
         var fmzSym = currentTrade.symbol;
         for (var i = 0; i < positions.length; i++) {
             var pos = positions[i];
-            // FMZ يُعيد ContractType للعقود الآجلة
+            // FMZ returns ContractType for futures positions
             if (pos.ContractType === fmzSym && Math.abs(pos.Amount) > 0) {
                 return true;
             }
         }
         return false;
     } catch (e) {
-        // في حالة الشك، نفترض أن المركز مفتوح
+        // Assume open if in doubt
         return true;
     }
 }
 
- // جلب السعر الحالي للرمز النشط
+ // Fetch current price for the active symbol
 function getCurrentPrice() {
     var ticker = retryCall(function () { return exchange.GetTicker(); });
     return ticker ? ticker.Last : 0;
 }
 
- // إغلاق المركز المفتوح بأمر سوق (للتايم-أوت أو الإيقاف الطارئ)
+ // Close open position with market order (for timeout or emergency stop)
 function closePositionMarket() {
     if (!currentTrade) return;
 
@@ -813,29 +810,29 @@ function closePositionMarket() {
 
     try {
         if (dir === "LONG") {
-            // إغلاق مركز شراء: نبيع
+            // Close long: sell
             exchange.SetDirection("closebuy");
             exchange.Sell(-1, size);
         } else {
-            // إغلاق مركز بيع: نشتري
+            // Close short: buy
             exchange.SetDirection("closesell");
             exchange.Buy(-1, size);
         }
-        Log("[إغلاق] تم إغلاق المركز بأمر سوق على", currentTrade.symbol);
+        Log("[CLOSE] Position closed at market on", currentTrade.symbol);
     } catch (e) {
-        Log("[خطأ] فشل إغلاق المركز:", e.message || e);
+        Log("[ERROR] Failed to close position:", e.message || e);
     }
 }
 
 // =====================================================================
-// مراقبة الصفقة — Trade Monitoring
+// Trade Monitoring
 // =====================================================================
 
- // مراقبة الصفقة المفتوحة حتى إغلاقها بأحد الأسباب:
- //   - TP  : وصل السعر لهدف الربح
- //   - SL  : وصل السعر لوقف الخسارة
- //   - TIMEOUT: تجاوزت الصفقة MAX_TRADE_MINUTES دقيقة
- // بعد الإغلاق: يُحدث الإحصائيات ويطبع النتيجة ويُسجّل الربح في FMZ
+ // Monitor open trade until closed by one of:
+ //   - TP      : price reached take profit
+ //   - SL      : price reached stop loss
+ //   - TIMEOUT : trade exceeded MAX_TRADE_MINUTES
+ // After close: updates stats, prints result, logs profit to FMZ
 function monitorTrade() {
     if (!currentTrade) return;
 
@@ -845,28 +842,28 @@ function monitorTrade() {
     var tpPrice     = currentTrade.tpPrice;
     var slPrice     = currentTrade.slPrice;
     var entryTime   = currentTrade.entryTime;
-    var maxMs       = MAX_TRADE_MINUTES * 60 * 1000; // بالميلي ثانية
+    var maxMs       = MAX_TRADE_MINUTES * 60 * 1000; // in milliseconds
 
     var closeReason = "TIMEOUT";
     var closePrice  = entryPrice;
 
-    Log("\n[مراقبة] مراقبة صفقة", dir, "على", symbol);
-    Log("[مراقبة] سعر الدخول: $" + entryPrice.toFixed(6) +
+    Log("\n[MONITOR] Monitoring", dir, "trade on", symbol);
+    Log("[MONITOR] Entry: $" + entryPrice.toFixed(6) +
         " | TP: $" + tpPrice.toFixed(6) +
         " | SL: $" + slPrice.toFixed(6));
 
-    // تأكيد الرمز في FMZ قبل المراقبة
+    // Confirm symbol in FMZ before monitoring
     try { exchange.SetContractType(symbol); } catch (e) {}
 
     // ─────────────────────────────────────────
-    // حلقة المراقبة — تستمر حتى الإغلاق
+    // Monitoring loop — runs until trade closes
     // ─────────────────────────────────────────
     while (true) {
         var elapsed = Date.now() - entryTime;
 
-        // ── فحص انتهاء الوقت (20 دقيقة) ──
+        // Check timeout
         if (elapsed >= maxMs) {
-            Log("[انتهاء الوقت] تجاوزت الصفقة " + MAX_TRADE_MINUTES + " دقيقة — جاري الإغلاق...");
+            Log("[TIMEOUT] Trade exceeded " + MAX_TRADE_MINUTES + " min — closing...");
             cancelTpSl();
             closePositionMarket();
             closePrice  = getCurrentPrice();
@@ -874,13 +871,13 @@ function monitorTrade() {
             break;
         }
 
-        // ── فحص حالة المركز ──
+        // Check position status
         var posOpen = isPositionOpen();
         if (!posOpen) {
-            // المركز أُغلق بواسطة TP أو SL تلقائياً
+            // Position closed by TP or SL automatically
             var curPrice = getCurrentPrice();
 
-            // تحديد سبب الإغلاق بناءً على الاتجاه والسعر
+            // Determine close reason based on direction and price
             if (dir === "LONG") {
                 if (curPrice >= tpPrice * 0.999) {
                     closeReason = "TP";
@@ -899,26 +896,26 @@ function monitorTrade() {
                 }
             }
 
-            // إلغاء أي أوامر متبقية
+            // Cancel any remaining orders
             cancelTpSl();
-            Log("[إغلاق] الصفقة أُغلقت بواسطة: " + closeReason +
-                " | السعر: $" + closePrice.toFixed(6));
+            Log("[CLOSED] Trade closed by: " + closeReason +
+                " | Price: $" + closePrice.toFixed(6));
             break;
         }
 
-        // ── طباعة حالة الصفقة ──
+        // Print trade status
         var remaining = maxMs - elapsed;
         var mins = Math.floor(remaining / 60000);
         var secs = Math.floor((remaining % 60000) / 1000);
         var curP = getCurrentPrice();
-        Log("[مراقبة] السعر الحالي: $" + curP.toFixed(6) +
-            " | الوقت المتبقي: " + mins + "د " + secs + "ث");
+        Log("[MONITOR] Price: $" + curP.toFixed(6) +
+            " | Time left: " + mins + "m " + secs + "s");
 
         Sleep(POSITION_POLL_MS);
     }
 
     // ─────────────────────────────────────────
-    // حساب الأرباح والخسائر — PnL Calculation
+    // PnL Calculation
     // ─────────────────────────────────────────
     var pnlPct;
     if (dir === "LONG") {
@@ -929,7 +926,7 @@ function monitorTrade() {
 
     var pnlUsdt = pnlPct * currentTrade.size * entryPrice;
 
-    // تحديث الإحصائيات
+    // Update statistics
     stats.totalTrades += 1;
     stats.totalPnl    += pnlUsdt;
 
@@ -941,10 +938,10 @@ function monitorTrade() {
         stats.timeouts += 1;
     }
 
-    // جلب الرصيد المحدّث من FMZ
+    // Fetch updated balance from FMZ
     var accountUpdated = retryCall(function () { return exchange.GetAccount(); });
     if (accountUpdated) {
-        // Balance + FrozenBalance = إجمالي الرصيد
+        // Balance + FrozenBalance = total balance
         stats.balance = (accountUpdated.Balance || 0) +
                         (accountUpdated.FrozenBalance || 0);
     } else {
@@ -952,29 +949,29 @@ function monitorTrade() {
     }
 
     var pnlSign = pnlUsdt >= 0 ? "+" : "";
-    Log("\n══════════════════════════════════════");
-    Log("[نتيجة] سبب الإغلاق  :", closeReason);
-    Log("[نتيجة] ربح/خسارة    :", pnlSign + pnlUsdt.toFixed(4) + " USDT",
+    Log("\n======================================");
+    Log("[RESULT] Close reason :", closeReason);
+    Log("[RESULT] PnL          :", pnlSign + pnlUsdt.toFixed(4) + " USDT",
         "(" + pnlSign + (pnlPct * 100).toFixed(4) + "%)");
-    Log("[نتيجة] الرصيد الجديد: $" + stats.balance.toFixed(2));
-    Log("══════════════════════════════════════\n");
+    Log("[RESULT] New balance  : $" + stats.balance.toFixed(2));
+    Log("======================================\n");
 
-    // تسجيل الربح في منصة FMZ (يُظهر في الرسم البياني للأداء)
+    // Log profit to FMZ platform (shown in performance chart)
     LogProfit(stats.balance);
 
-    // إعادة تعيين حالة الصفقة
+    // Reset trade state
     currentTrade = null;
 
-    // طباعة اللوحة بعد كل صفقة
+    // Print dashboard after each trade
     printDashboard();
 }
 
 // =====================================================================
-// لوحة التحكم — Dashboard
+// Dashboard
 // =====================================================================
 
- // طباعة لوحة تحكم كاملة في سجل FMZ
- // تُطبع بعد كل صفقة وكل DASHBOARD_INTERVAL ميلي ثانية
+ // Print full dashboard to FMZ log
+ // Printed after each trade and every DASHBOARD_INTERVAL ms
 function printDashboard() {
     lastDashboardPrint = Date.now();
 
@@ -1006,7 +1003,7 @@ function printDashboard() {
         var remaining = Math.max(0, MAX_TRADE_MINUTES * 60000 - elapsed);
         var rMin = Math.floor(remaining / 60000);
         var rSec = Math.floor((remaining % 60000) / 1000);
-        timeDisp = rMin + " دقيقة " + rSec + " ثانية";
+        timeDisp = rMin + "m " + rSec + "s";
     }
 
     var pnlSign = totalPnl >= 0 ? "+" : "";
@@ -1014,132 +1011,132 @@ function printDashboard() {
     Log("╔══════════════════════════════════════════════╗");
     Log("║        🔪 THE SURGEON BOT — LIVE             ║");
     Log("╠══════════════════════════════════════════════╣");
-    Log("║  الرصيد الحالي      : $" + balance.toFixed(2) + " USDT");
-    Log("║  رأس المال الأولي   : $" + INITIAL_CAPITAL.toFixed(2));
-    Log("║  إجمالي الربح/خسارة : " + pnlSign + "$" + totalPnl.toFixed(2) +
+    Log("║  Balance            : $" + balance.toFixed(2) + " USDT");
+    Log("║  Initial Capital    : $" + INITIAL_CAPITAL.toFixed(2));
+    Log("║  Total PnL          : " + pnlSign + "$" + totalPnl.toFixed(2) +
         "  (" + pnlSign + pnlPctTotal.toFixed(2) + "%)");
     Log("╠══════════════════════════════════════════════╣");
-    Log("║  إجمالي الصفقات     :", total);
-    Log("║  صفقات رابحة        :", wins, " (" + winPct.toFixed(1) + "%)");
-    Log("║  صفقات خاسرة        :", losses, " (" + lossPct.toFixed(1) + "%)");
-    Log("║  إغلاق بالوقت       :", timeouts);
+    Log("║  Total Trades       :", total);
+    Log("║  Wins               :", wins, " (" + winPct.toFixed(1) + "%)");
+    Log("║  Losses             :", losses, " (" + lossPct.toFixed(1) + "%)");
+    Log("║  Timeouts           :", timeouts);
     Log("╠══════════════════════════════════════════════╣");
-    Log("║  الحالة             :", status);
-    Log("║  الرمز الحالي       :", symDisp);
-    Log("║  الاتجاه            :", dirDisp);
-    Log("║  سعر الدخول         :", entryDisp);
-    Log("║  هدف الربح          :", tpDisp);
-    Log("║  وقف الخسارة        :", slDisp);
-    Log("║  الوقت المتبقي      :", timeDisp);
-    Log("║  الرموز المراقبة    :", activeSymbols.length);
+    Log("║  Status             :", status);
+    Log("║  Symbol             :", symDisp);
+    Log("║  Direction          :", dirDisp);
+    Log("║  Entry Price        :", entryDisp);
+    Log("║  Take Profit        :", tpDisp);
+    Log("║  Stop Loss          :", slDisp);
+    Log("║  Time Remaining     :", timeDisp);
+    Log("║  Symbols Watched    :", activeSymbols.length);
     Log("╚══════════════════════════════════════════════╝");
 }
 
 // =====================================================================
-// لافتة الإطلاق — Startup Banner
+// Startup Banner
 // =====================================================================
 
- // طباعة لافتة البداية مع معلومات التهيئة
+ // Print startup banner with configuration info
 function printBanner() {
     Log("╔══════════════════════════════════════════════════════╗");
-    Log("║          🔪 THE SURGEON BOT — جراح العملات          ║");
-    Log("║          Binance Futures Scalping Bot — FMZ Quant    ║");
+    Log("║          🔪 THE SURGEON BOT — FMZ QUANT             ║");
+    Log("║          Binance Futures Scalping Bot                ║");
     Log("╠══════════════════════════════════════════════════════╣");
-    Log("║  المنصة            : FMZ Quant (fmz.com)");
-    Log("║  البورصة           : Binance USDT-M Futures");
-    Log("║  رأس المال الأولي  : $" + INITIAL_CAPITAL);
-    Log("║  الرافعة المالية   : " + LEVERAGE + "x");
-    Log("║  الإطار الزمني     : 5 دقائق");
-    Log("║  الهدف             : +2.0% | وقف الخسارة: -0.7%");
-    Log("║  مدة الصفقة القصوى : " + MAX_TRADE_MINUTES + " دقيقة");
-    Log("║  عدد الرموز المراقبة: " + TOP_SYMBOLS_COUNT);
+    Log("║  Platform           : FMZ Quant (fmz.com)");
+    Log("║  Exchange           : Binance USDT-M Futures");
+    Log("║  Initial Capital    : $" + INITIAL_CAPITAL);
+    Log("║  Leverage           : " + LEVERAGE + "x");
+    Log("║  Timeframe          : 5 minutes");
+    Log("║  Target             : +2.0% | Stop Loss: -0.7%");
+    Log("║  Max Trade Duration : " + MAX_TRADE_MINUTES + " minutes");
+    Log("║  Symbols Watched    : " + TOP_SYMBOLS_COUNT);
     Log("╚══════════════════════════════════════════════════════╝");
 }
 
 // =====================================================================
-// الحلقة الرئيسية — Main Loop (نقطة الدخول في FMZ)
+// Main Loop (FMZ entry point)
 // =====================================================================
 
- // الدالة الرئيسية — يستدعيها FMZ تلقائياً عند تشغيل الاستراتيجية
- // تعمل في حلقة لانهائية حتى يوقفها المستخدم من لوحة FMZ
+ // Main function — called automatically by FMZ when strategy starts
+ // Runs in infinite loop until stopped from FMZ dashboard
 function main() {
-    // ─── طباعة اللافتة ───
+    // Print banner
     printBanner();
 
-    // ─── التحقق من صحة الإعدادات ───
+    // Validate settings
     if (LEVERAGE < 1 || LEVERAGE > 125) {
-        Log("[خطأ] الرافعة المالية يجب أن تكون بين 1 و 125!");
+        Log("[ERROR] Leverage must be between 1 and 125!");
         return;
     }
 
-    // ─── جلب الرصيد الأولي ───
-    Log("[اتصال] جاري الاتصال ببينانس فيوتشرز...");
+    // Fetch initial balance
+    Log("[CONNECT] Connecting to Binance Futures...");
     var account = retryCall(function () { return exchange.GetAccount(); });
     if (account) {
         var actualBalance = (account.Balance || 0) + (account.FrozenBalance || 0);
         if (actualBalance > 0) {
             stats.balance = actualBalance;
         }
-        Log("[رصيد] الرصيد الحالي: $" + stats.balance.toFixed(2) + " USDT");
+        Log("[BALANCE] Current balance: $" + stats.balance.toFixed(2) + " USDT");
     } else {
-        Log("[تحذير] فشل جلب الرصيد — سيُستخدم رأس المال الأولي: $" + INITIAL_CAPITAL);
+        Log("[WARN] Failed to fetch balance — using initial capital: $" + INITIAL_CAPITAL);
     }
 
-    // ─── تحميل قائمة الرموز الأولية ───
-    Log("[تهيئة] جاري تحميل قائمة الرموز...");
+    // Load initial symbol list
+    Log("[INIT] Loading symbol list...");
     activeSymbols      = fetchTopSymbols();
     symbolsLastUpdated = Date.now();
 
     if (!activeSymbols || activeSymbols.length === 0) {
-        Log("[خطأ فادح] فشل تحميل قائمة الرموز! تأكد من الاتصال بالبورصة.");
+        Log("[ERROR] Failed to load symbol list! Check exchange connection.");
         return;
     }
 
-    Log("[جاهز] تم تحميل " + activeSymbols.length + " رمزاً. البوت يعمل الآن!");
+    Log("[READY] Loaded " + activeSymbols.length + " symbols. Bot is running!");
     printDashboard();
 
-    // ─── الحلقة الرئيسية اللانهائية ───
+    // Main infinite loop
     while (true) {
 
-        // ── تحديث قائمة الرموز كل 4 ساعات ──
+        // Refresh symbol list every 4 hours
         maybeRefreshSymbols();
 
-        // ── فحص الرصيد الحرج ──
+        // Check critical balance
         var accCheck = retryCall(function () { return exchange.GetAccount(); });
         if (accCheck) {
             var freeBalance = accCheck.Balance || 0;
             stats.balance   = freeBalance + (accCheck.FrozenBalance || 0);
 
             if (freeBalance < MIN_BALANCE) {
-                Log("\n[تحذير حرج] ⚠️  الرصيد المتاح $" + freeBalance.toFixed(2) +
-                    " أقل من الحد الأدنى $" + MIN_BALANCE + "!");
-                Log("[إيقاف] تم إيقاف التداول بسبب انخفاض الرصيد.");
+                Log("\n[CRITICAL] Available balance $" + freeBalance.toFixed(2) +
+                    " below minimum $" + MIN_BALANCE + "!");
+                Log("[STOP] Trading stopped due to low balance.");
                 printDashboard();
-                break; // إيقاف الحلقة — سيوقف FMZ الاستراتيجية
+                break; // Stop loop — FMZ will halt the strategy
             }
         }
 
-        // ── إذا لا توجد صفقة مفتوحة، ابحث عن إشارة ──
+        // If no open trade, look for a signal
         if (!currentTrade) {
             var signal = scanSymbols();
 
             if (signal) {
-                // محاولة تنفيذ الصفقة
+                // Attempt to execute trade
                 var success = executeTrade(signal);
 
                 if (success) {
-                    // مراقبة الصفقة حتى إغلاقها (TP / SL / TIMEOUT)
+                    // Monitor trade until closed (TP / SL / TIMEOUT)
                     monitorTrade();
                 } else {
-                    Log("[تحذير] فشل تنفيذ الصفقة على", signal.symbol);
+                    Log("[WARN] Failed to execute trade on", signal.symbol);
                     Sleep(5000);
                 }
 
             } else {
-                Log("[مسح] لم يُعثر على إشارات — الانتظار " +
-                    (SCAN_INTERVAL_MS / 1000) + " ثانية...");
+                Log("[SCAN] No signals found — waiting " +
+                    (SCAN_INTERVAL_MS / 1000) + " seconds...");
 
-                // طباعة اللوحة كل DASHBOARD_INTERVAL
+                // Print dashboard every DASHBOARD_INTERVAL
                 if (Date.now() - lastDashboardPrint >= DASHBOARD_INTERVAL) {
                     printDashboard();
                 }
@@ -1148,16 +1145,16 @@ function main() {
             }
 
         } else {
-            // في حال غير متوقع — استئناف مراقبة الصفقة القائمة
-            Log("[استئناف] استئناف مراقبة صفقة قائمة على", currentTrade.symbol);
+            // Unexpected state — resume monitoring existing trade
+            Log("[RESUME] Resuming monitor on existing trade:", currentTrade.symbol);
 
-            // تأكيد تعيين الرمز
+            // Confirm symbol is set
             try { exchange.SetContractType(currentTrade.symbol); } catch (e) {}
 
             monitorTrade();
         }
     }
 
-    Log("[إيقاف] تم إيقاف البوت.");
+    Log("[STOP] Bot stopped.");
     printDashboard();
 }
