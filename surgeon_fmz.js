@@ -274,8 +274,8 @@ function calcVolSMA(records, period) {
 // =====================================================================
 
  // Check five conditions on closed candles:
- //   1. EMA9 / EMA21 crossover
- //   2. RSI(14) within range
+ //   1. EMA9 > EMA21 trend (long) / EMA9 < EMA21 (short)
+ //   2. RSI(14): 40-65 long, 35-60 short
  //   3. Price above/below VWAP
  //   4. Volume spike > 1.5x average
  //   5. MACD line cross with signal line (last two candles)
@@ -342,16 +342,16 @@ function checkSignal(records) {
     if (isNaN(difCur) || isNaN(deaCur) || isNaN(difPrv) || isNaN(deaPrv)) return null;
 
     // ─────────────────────────────────────────────
-    // 1. EMA9 / EMA21 crossover condition
+    // 1. EMA9 / EMA21 trend condition (relaxed from exact crossover)
     // ─────────────────────────────────────────────
-    var emaCrossLong  = (ema9Prv < ema21Prv) && (ema9Cur > ema21Cur); // bullish cross
-    var emaCrossShort = (ema9Prv > ema21Prv) && (ema9Cur < ema21Cur); // bearish cross
+    var emaCrossLong  = ema9Cur > ema21Cur; // bullish trend
+    var emaCrossShort = ema9Cur < ema21Cur; // bearish trend
 
     // ─────────────────────────────────────────────
-    // 2. RSI(14) condition: 45-60 for long, 40-55 for short
+    // 2. RSI(14) condition: 40-65 for long, 35-60 for short
     // ─────────────────────────────────────────────
-    var rsiLong  = (rsiCur >= 45) && (rsiCur <= 60);
-    var rsiShort = (rsiCur >= 40) && (rsiCur <= 55);
+    var rsiLong  = (rsiCur >= 40) && (rsiCur <= 65);
+    var rsiShort = (rsiCur >= 35) && (rsiCur <= 60);
 
     // ─────────────────────────────────────────────
     // 3. VWAP condition: price above VWAP for long, below for short
@@ -361,9 +361,9 @@ function checkSignal(records) {
     var vwapShort  = closeCur < vwapCur;
 
     // ─────────────────────────────────────────────
-    // 4. Volume spike condition: > 1.5x average
+    // 4. Volume spike condition: > 1.2x average
     // ─────────────────────────────────────────────
-    var volSpike = cur.Volume > (1.5 * volSMA);
+    var volSpike = cur.Volume > (1.2 * volSMA);
 
     // ─────────────────────────────────────────────
     // 5. MACD cross with signal line (last two candles)
