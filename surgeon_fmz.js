@@ -34,8 +34,9 @@ var TOP_SYMBOLS_COUNT    = 200;         // Number of top symbols by volume (igno
 var TIMEFRAME            = PERIOD_M5;  // Timeframe (5 minutes)
 var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
 var LEVERAGE             = 10;         // Leverage
-var RISK_PER_TRADE_PCT   = 0.02;       // Risk 2% of balance per trade
+
 var MAX_ORDER_USDT       = 200;        // Hard cap: never put more than $200 into one trade
+var MIN_DAILY_VOLUME_USDT = 50000000; // Minimum $50M daily volume to trade a symbol
 var SYMBOL_COOLDOWN_MS   = 300000;     // 5 minutes per-symbol cooldown after trading
 var TP_PCT_LONG          = 1.060;      // Take profit for long  (+6%)
 var TP_PCT_SHORT         = 0.940;      // Take profit for short (-6%)
@@ -188,9 +189,10 @@ function fetchTopSymbols() {
 
     // Take top TOP_SYMBOLS_COUNT symbols
     var top = [];
-    var limit = Math.min(TOP_SYMBOLS_COUNT, futures.length);
-    for (var j = 0; j < limit; j++) {
+    for (var j = 0; j < futures.length; j++) {
+        if (futures[j].volume < MIN_DAILY_VOLUME_USDT) break; // sorted descending, stop here
         top.push(futures[j].symbol);
+        if (top.length >= TOP_SYMBOLS_COUNT) break;
     }
 
     Log("[SYMBOLS] Loaded", top.length, "symbols successfully.");
@@ -381,7 +383,7 @@ function checkSignal(records) {
     // ─────────────────────────────────────────────
     // 4. Volume spike condition: > 1.2x average
     // ─────────────────────────────────────────────
-    var volSpike = cur.Volume > (1.2 * volSMA);
+    var volSpike = cur.Volume > (2.0 * volSMA);
 
     // ─────────────────────────────────────────────
     // 5. MACD line position relative to signal line
@@ -676,10 +678,13 @@ function executeTrade(signal) {
     var priceDec   = getDecimals(symInfo.tickSize);
     var amountDec  = getDecimals(stepSize);
 
-    // Calculate position size: risk a fixed % of balance, capped at MAX_ORDER_USDT
-    var tradeUsdt = Math.min(freeUsdt * RISK_PER_TRADE_PCT, MAX_ORDER_USDT);
+    // Calculate position size: max loss = 2% of balance, margin = maxLoss / (slPct * LEVERAGE)
+    var slPct     = (dir === "LONG") ? (1 - SL_PCT_LONG) : (SL_PCT_SHORT - 1);
+    var maxLoss   = stats.balance * 0.02;
+    var tradeUsdt = maxLoss / (slPct * LEVERAGE);
+    tradeUsdt = Math.min(tradeUsdt, MAX_ORDER_USDT);
     Log("[SIZE] Trade allocation: $" + tradeUsdt.toFixed(2) +
-        " (" + (RISK_PER_TRADE_PCT * 100).toFixed(0) + "% of $" + freeUsdt.toFixed(2) + ")");
+        " (maxLoss $" + maxLoss.toFixed(2) + " | balance $" + stats.balance.toFixed(2) + ")");
     var rawSize  = (tradeUsdt * LEVERAGE) / entryEstimate;
     var size     = floorTo(rawSize, amountDec);
 
