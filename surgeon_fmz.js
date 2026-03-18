@@ -31,7 +31,7 @@ FMZ functions used:
 var TESTNET              = true;        // Set true when using Binance Futures Testnet
 var INITIAL_CAPITAL      = 500;         // Initial capital in USD
 var TOP_SYMBOLS_COUNT    = 200;         // Number of top symbols by volume (ignored on testnet)
-var TIMEFRAME            = PERIOD_M5;  // Timeframe (5 minutes)
+var TIMEFRAME            = PERIOD_M15; // Timeframe (15 minutes)
 var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
 var LEVERAGE             = 10;         // Leverage
 
@@ -1124,7 +1124,7 @@ function printBanner() {
     Log("|  Exchange           : Binance USDT-M Futures" + (TESTNET ? " [TESTNET]" : ""));
     Log("|  Initial Capital    : $" + INITIAL_CAPITAL);
     Log("|  Leverage           : " + LEVERAGE + "x");
-    Log("|  Timeframe          : 5 minutes");
+    Log("|  Timeframe          : 15 minutes");
     Log("|  Target             : +2.0% | Stop Loss: -0.7%");
     Log("|  Max Trade Duration : " + MAX_TRADE_MINUTES + " minutes");
     Log("|  Symbols Watched    : " + TOP_SYMBOLS_COUNT);
