@@ -1,7 +1,7 @@
 /*
 +==============================================================+
-|   THE SURGEON BOT v2 — FMZ BACKTEST EDITION                |
-|   Strategy: Dual-TF EMA3/8 + ADX + ATR-Based SL/TP         |
+|   THE SURGEON BOT v2 — ETH EDITION                         |
+|   Strategy: Dual-TF EMA8/21 + ADX + ATR-Based SL/TP        |
 |   100% Compatible with FMZ Quant Backtest Tab               |
 +==============================================================+
 
@@ -10,30 +10,35 @@ HOW TO RUN (FMZ Backtest Tab):
   2. Click "Backtest" tab
   3. Settings:
        Exchange  : Binance Futures (USDT-M)
-       Symbol    : BTC_USDT  (or any USDT pair)
-       Period    : 15 minutes
+       Symbol    : ETH_USDT
+       Period    : 1 hour
        Start/End : choose your date range
        Capital   : set to INITIAL_CAPITAL value below (e.g. 10000)
        Leverage  : set to LEVERAGE value below (e.g. 10)
   4. Click Run → results appear in Log panel + Profit chart
 
 STRATEGY:
-  Timeframes : M15 (entry signals) + H4 (trend bias)
-  ─ Long  : H4 EMA3 > EMA8 AND price > EMA200
-             + M15 EMA3 crosses EMA8 upward (fresh crossover)
-             + M15 price above VWAP
-             + M15 ADX > 20
-             + M15 current ATR > average ATR(20)
+  Timeframes : H1 (entry signals) + H4 (trend bias)
+  ─ Long  : H4 EMA8 > EMA21 AND price > EMA200
+             + H1 EMA8 crosses EMA21 upward
+             + H1 price above VWAP
+             + H1 ADX > 25
+             + H1 ATR > avg ATR(20)
+             + Session: 13:00–16:00 UTC only
 
-  ─ Short : H4 EMA3 < EMA8 AND price < EMA200
-             + M15 EMA3 crosses EMA8 downward
-             + M15 price below VWAP
-             + M15 ADX > 20
-             + M15 current ATR > average ATR(20)
+  ─ Short : H4 EMA8 < EMA21 AND price < EMA200
+             + H4 gap to EMA200 > 1% (clear distance)
+             + H4 last candle bearish (Close < Open)
+             + H1 EMA8 crosses EMA21 downward
+             + H1 price below VWAP
+             + H1 ADX > 25
+             + H1 ATR > avg ATR(20)
+             + Session: 13:00–16:00 UTC only
 
-  Stop Loss  : entry ± 1.5 × ATR(14)
-  Take Profit: entry ± 3.0 × ATR(14)   ← R:R = 2:1
+  Stop Loss  : entry ± 2.0 × ATR(14)
+  Take Profit: entry ± 4.0 × ATR(14)   ← R:R = 2:1
   Size       : (balance × 2%) ÷ SL distance in USD
+  Fees       : 0.02% Maker + 0.05% Slippage + Funding
 
   Risk Guard : if cumulative drawdown ≥ 20% of peak balance
                → close any open trade immediately
@@ -41,7 +46,7 @@ STRATEGY:
                → auto-resume and reset peak after cooldown
 
 FMZ COMPATIBILITY NOTES:
-  ✅ exchange.GetRecords(PERIOD_M15)  — works in backtest
+  ✅ exchange.GetRecords(PERIOD_H1)   — works in backtest
   ✅ exchange.GetRecords(PERIOD_H4)   — works in backtest
   ✅ exchange.GetTicker()             — works in backtest
   ✅ exchange.GetAccount()            — works in backtest
@@ -67,17 +72,27 @@ var LEVERAGE        = 10;      // leverage (set same in FMZ backtest config)
 var RISK_PER_TRADE  = 0.02;    // 2% of balance risked per trade
 
 var ATR_PERIOD      = 14;      // ATR period
-var ATR_SL_MULT     = 1.5;     // stop loss  = 1.5 × ATR from entry
-var ATR_TP_MULT     = 3.0;     // take profit = 3.0 × ATR from entry  (R:R 2:1)
+var ATR_SL_MULT     = 2.0;     // stop loss  = 2.0 × ATR from entry  // ✏️ معدّل للـ ETH Edition
+var ATR_TP_MULT     = 4.0;     // take profit = 4.0 × ATR from entry  (R:R 2:1)  // ✏️ معدّل للـ ETH Edition
 
 var ADX_PERIOD      = 14;      // ADX calculation period
-var ADX_MIN         = 20;      // minimum ADX value to allow entry
+var ADX_MIN         = 25;      // minimum ADX value to allow entry  // ✏️ معدّل للـ ETH Edition
 
 var MAX_DD_PCT      = 0.20;    // max drawdown threshold (20%)
 var COOLDOWN_HOURS  = 12;      // hours to pause after max DD hit
 
 var POLL_MS         = 60000;   // monitoring poll interval in ms (1 min sim time)
-                               // checks price 15× per M15 candle — accurate enough
+                               // checks price 4× per H1 candle — accurate enough
+
+// ── Trading Session Filter ──────────────────────────────────────────── // ✏️ معدّل للـ ETH Edition
+var SESSION_START_UTC = 13;    // 1:00 PM UTC — London/NY overlap opens
+var SESSION_END_UTC   = 16;    // 4:00 PM UTC — peak liquidity window
+
+// ── Realistic Cost Simulation ─────────────────────────────────────────  // ✏️ معدّل للـ ETH Edition
+var MAKER_FEE      = 0.0002;   // 0.02% per side (Binance Futures maker)
+var SLIPPAGE_PCT   = 0.0005;   // 0.05% slippage on entry
+var FUNDING_RATE   = 0.0001;   // 0.01% per funding period
+var FUNDING_PERIOD = 8;        // hours between each funding payment
 
 // =====================================================================
 // GLOBAL STATE
@@ -110,6 +125,13 @@ function floorTo(val, decimals) {
 // Format number with leading sign for display
 function signStr(val) {
     return val >= 0 ? "+" : "";
+}
+
+// ── Trading Session Check ─────────────────────────────────────────────  // ✏️ معدّل للـ ETH Edition
+// Returns true only during the 13:00–16:00 UTC London/NY overlap window.
+function isInTradingSession() {
+    var hour = new Date().getUTCHours();
+    return hour >= SESSION_START_UTC && hour < SESSION_END_UTC;
 }
 
 // =====================================================================
@@ -295,52 +317,67 @@ function calcSMA(arr, period) {
 // =====================================================================
 
 // ── H4 Trend Bias ─────────────────────────────────────────────────────
-// Returns "BULL", "BEAR", or "NEUTRAL"
+// Returns object { bias, ema200gap, lastCandleBearish }
+//   bias             : "BULL" | "BEAR" | "NEUTRAL"
+//   ema200gap        : abs distance between close and EMA200 as fraction (e.g. 0.015 = 1.5%)
+//   lastCandleBearish: true if last closed H4 candle has Close < Open
 // Uses the last CLOSED H4 candle (always excludes the forming one)
+// ✏️ معدّل للـ ETH Edition
 function getH4Bias(recordsH4) {
-    if (!recordsH4 || recordsH4.length < 203) return "NEUTRAL";
+    var neutral = { bias: "NEUTRAL", ema200gap: 0, lastCandleBearish: false };
+    if (!recordsH4 || recordsH4.length < 230) return neutral;  // ✏️ معدّل للـ ETH Edition
 
     // Slice off the still-forming H4 candle
     var recs = recordsH4.slice(0, recordsH4.length - 1);
     var n    = recs.length;
 
-    var ema3Arr   = TA.EMA(recs, 3);
-    var ema8Arr   = TA.EMA(recs, 8);
+    var ema8Arr   = TA.EMA(recs, 8);    // ✏️ معدّل للـ ETH Edition (was EMA3)
+    var ema21Arr  = TA.EMA(recs, 21);   // ✏️ معدّل للـ ETH Edition (was EMA8)
     var ema200Arr = TA.EMA(recs, 200);
 
-    var ema3   = ema3Arr[n - 1];
     var ema8   = ema8Arr[n - 1];
+    var ema21  = ema21Arr[n - 1];
     var ema200 = ema200Arr[n - 1];
     var close  = recs[n - 1].Close;
 
-    if (isNaN(ema3) || isNaN(ema8) || isNaN(ema200)) return "NEUTRAL";
+    if (isNaN(ema8) || isNaN(ema21) || isNaN(ema200)) return neutral;
 
-    if (ema3 > ema8 && close > ema200) return "BULL";
-    if (ema3 < ema8 && close < ema200) return "BEAR";
-    return "NEUTRAL";
+    // Gap between current price and EMA200 as a fraction
+    var ema200gap = ema200 > 0 ? Math.abs(close - ema200) / ema200 : 0;
+
+    // Last closed candle is bearish when Close < Open
+    var lastCandleBearish = recs[n - 1].Close < recs[n - 1].Open;
+
+    var bias = "NEUTRAL";
+    if (ema8 > ema21 && close > ema200) bias = "BULL";  // ✏️ معدّل للـ ETH Edition
+    if (ema8 < ema21 && close < ema200) bias = "BEAR";  // ✏️ معدّل للـ ETH Edition
+
+    return { bias: bias, ema200gap: ema200gap, lastCandleBearish: lastCandleBearish };
 }
 
-// ── M15 Entry Signal ──────────────────────────────────────────────────
-// Checks all 5 conditions on the last two closed M15 candles.
-// Condition 1 : Fresh EMA3/EMA8 crossover (strict: happened on current candle)
+// ── H1 Entry Signal ───────────────────────────────────────────────────
+// Checks all conditions on the last two closed H1 candles.
+// Condition 1 : Fresh EMA8/EMA21 crossover (strict: happened on current candle)
 // Condition 2 : Price on correct side of VWAP
-// Condition 3 : ADX > ADX_MIN
+// Condition 3 : ADX > ADX_MIN (25)
 // Condition 4 : Current ATR > 20-period ATR average (volatility expansion)
-// Condition 5 : H4 bias matches direction (passed as parameter)
+// Condition 5 : H4 bias matches direction (passed as h4Result object)
+// Condition 6 : SHORT only — H4 EMA200 gap > 1% AND last H4 candle bearish
 //
-// Returns { signal: "LONG"|"SHORT"|null, atr, adx, vwap, ema3, ema8 }
-function checkM15Signal(recordsM15, h4Bias) {
-    var empty = { signal: null, atr: 0, adx: 0, vwap: 0, ema3: 0, ema8: 0 };
-    if (!recordsM15 || recordsM15.length < 60) return empty;
+// Returns { signal: "LONG"|"SHORT"|null, atr, adx, vwap, ema8, ema21 }
+// ✏️ معدّل للـ ETH Edition
+function checkH1Signal(recordsH1, h4Result) {
+    var empty = { signal: null, atr: 0, adx: 0, vwap: 0, ema8: 0, ema21: 0 };
+    if (!recordsH1 || recordsH1.length < 80) return empty;  // ✏️ معدّل للـ ETH Edition
 
     // Work only on closed candles (remove forming candle)
-    var recs = recordsM15.slice(0, recordsM15.length - 1);
+    var recs = recordsH1.slice(0, recordsH1.length - 1);
     var n    = recs.length;
-    if (n < 60) return empty;
+    if (n < 80) return empty;  // ✏️ معدّل للـ ETH Edition
 
     // Compute indicators
-    var ema3Arr   = TA.EMA(recs, 3);
-    var ema8Arr   = TA.EMA(recs, 8);
+    var ema8Arr   = TA.EMA(recs, 8);    // ✏️ معدّل للـ ETH Edition (was EMA3)
+    var ema21Arr  = TA.EMA(recs, 21);   // ✏️ معدّل للـ ETH Edition (was EMA8)
     var vwapArr   = calcVWAP(recs);
     var atrArr    = calcATR(recs, ATR_PERIOD);
     var adxResult = calcADX(recs, ADX_PERIOD);
@@ -350,27 +387,27 @@ function checkM15Signal(recordsM15, h4Bias) {
     var cur = n - 1;
     var prv = n - 2;
 
-    var e3c    = ema3Arr[cur];
-    var e3p    = ema3Arr[prv];
-    var e8c    = ema8Arr[cur];
-    var e8p    = ema8Arr[prv];
+    var e8c    = ema8Arr[cur];    // ✏️ معدّل للـ ETH Edition
+    var e8p    = ema8Arr[prv];    // ✏️ معدّل للـ ETH Edition
+    var e21c   = ema21Arr[cur];   // ✏️ معدّل للـ ETH Edition
+    var e21p   = ema21Arr[prv];   // ✏️ معدّل للـ ETH Edition
     var vwap   = vwapArr[cur];
     var atr    = atrArr[cur];
     var atrSMA = atrSMAArr[cur];
     var adx    = adxResult.adx[cur];
 
     // Reject if any indicator is still warming up
-    if (isNaN(e3c) || isNaN(e3p) || isNaN(e8c) || isNaN(e8p)) return empty;
+    if (isNaN(e8c) || isNaN(e8p) || isNaN(e21c) || isNaN(e21p)) return empty;
     if (isNaN(vwap) || isNaN(atr) || isNaN(atrSMA) || isNaN(adx)) return empty;
     if (atr <= 0) return empty;
 
     var close = recs[cur].Close;
 
-    // ── Condition 1: Fresh EMA3/EMA8 crossover ──
-    // Cross UP:   previous candle EMA3 ≤ EMA8, current EMA3 > EMA8
-    // Cross DOWN: previous candle EMA3 ≥ EMA8, current EMA3 < EMA8
-    var crossUp   = (e3p <= e8p) && (e3c > e8c);
-    var crossDown = (e3p >= e8p) && (e3c < e8c);
+    // ── Condition 1: Fresh EMA8/EMA21 crossover ──  // ✏️ معدّل للـ ETH Edition
+    // Cross UP:   previous EMA8 ≤ EMA21, current EMA8 > EMA21
+    // Cross DOWN: previous EMA8 ≥ EMA21, current EMA8 < EMA21
+    var crossUp   = (e8p <= e21p) && (e8c > e21c);   // ✏️ معدّل للـ ETH Edition
+    var crossDown = (e8p >= e21p) && (e8c < e21c);   // ✏️ معدّل للـ ETH Edition
 
     // ── Condition 2: Price vs VWAP ──
     var aboveVWAP = close > vwap;
@@ -382,12 +419,18 @@ function checkM15Signal(recordsM15, h4Bias) {
     // ── Condition 4: ATR volatility expansion ──
     var atrSpike = atr > atrSMA;
 
+    // ── Condition 5+6: SHORT extra filters — H4 EMA200 gap > 1% AND bearish candle ──
+    // ✏️ معدّل للـ ETH Edition — tighter SHORT entry for ETH downtrends
+    var shortExtra = h4Result.ema200gap > 0.01 && h4Result.lastCandleBearish;
+
     // ── Signal: all conditions + H4 bias agreement ──
     var signal = null;
-    if (h4Bias === "BULL" && crossUp   && aboveVWAP && adxOk && atrSpike) signal = "LONG";
-    if (h4Bias === "BEAR" && crossDown && belowVWAP && adxOk && atrSpike) signal = "SHORT";
+    if (h4Result.bias === "BULL" && crossUp   && aboveVWAP && adxOk && atrSpike)
+        signal = "LONG";
+    if (h4Result.bias === "BEAR" && crossDown && belowVWAP && adxOk && atrSpike && shortExtra)
+        signal = "SHORT";
 
-    return { signal: signal, atr: atr, adx: adx, vwap: vwap, ema3: e3c, ema8: e8c };
+    return { signal: signal, atr: atr, adx: adx, vwap: vwap, ema8: e8c, ema21: e21c };
 }
 
 // =====================================================================
@@ -467,6 +510,16 @@ function executeTrade(dir, atr) {
         return false;
     }
     var entryPrice = ticker.Last;
+
+    // ── Apply slippage to entry price ─────────────────────────────────
+    // Long  : we buy at a slightly higher price (ask side slippage)
+    // Short : we sell at a slightly lower price (bid side slippage)
+    // ✏️ معدّل للـ ETH Edition
+    if (dir === "LONG") {
+        entryPrice = entryPrice * (1 + SLIPPAGE_PCT);
+    } else {
+        entryPrice = entryPrice * (1 - SLIPPAGE_PCT);
+    }
 
     // Get current balance
     var account = exchange.GetAccount();
@@ -618,6 +671,25 @@ function monitorTrade() {
         ? (closePrice - entry) * size
         : (entry - closePrice) * size;
 
+    // ── Deduct realistic trading costs ─────────────────────────
+    // ✏️ معدّل للـ ETH Edition
+    var feeEntry  = currentTrade.entryPrice * currentTrade.size * MAKER_FEE;
+    var feeExit   = closePrice * currentTrade.size * MAKER_FEE;
+    var totalFees = feeEntry + feeExit;
+
+    var holdHours    = (Date.now() - currentTrade.entryTime) / 3600000;
+    var fundingTimes = Math.floor(holdHours / FUNDING_PERIOD);
+    var fundingCost  = currentTrade.entryPrice * currentTrade.size *
+                       FUNDING_RATE * fundingTimes;
+    // Long pays funding; Short receives funding
+    if (currentTrade.direction === "SHORT") fundingCost = -fundingCost;
+
+    pnlUsdt = pnlUsdt - totalFees - fundingCost;
+
+    Log("[COSTS] Fees: $" + totalFees.toFixed(4) +
+        " | Funding: $" + fundingCost.toFixed(4) +
+        " | Net PnL: $" + pnlUsdt.toFixed(4));
+
     stats.totalTrades++;
     stats.totalPnl += pnlUsdt;
     if (closeReason === "TP" || (closeReason !== "SL" && pnlUsdt > 0)) {
@@ -656,27 +728,28 @@ function monitorTrade() {
 // DASHBOARD — printed each scan cycle
 // =====================================================================
 
-function printDashboard(h4Bias, m15Result, price) {
-    var signal = m15Result.signal;
-    var adx    = m15Result.adx;
-    var atr    = m15Result.atr;
-    var vwap   = m15Result.vwap;
-    var ema3   = m15Result.ema3;
-    var ema8   = m15Result.ema8;
+// ✏️ معدّل للـ ETH Edition
+function printDashboard(h4Result, h1Result, price) {
+    var signal = h1Result.signal;
+    var adx    = h1Result.adx;
+    var atr    = h1Result.atr;
+    var vwap   = h1Result.vwap;
+    var ema8   = h1Result.ema8;
+    var ema21  = h1Result.ema21;
 
     var dd = peakBalance > 0
         ? (peakBalance - stats.balance) / peakBalance * 100
         : 0;
 
-    var h4Str = h4Bias === "BULL"
-        ? "Bullish (EMA3 > EMA8 & price > EMA200)"
-        : h4Bias === "BEAR"
-        ? "Bearish (EMA3 < EMA8 & price < EMA200)"
+    var h4Str = h4Result.bias === "BULL"
+        ? "Bullish (EMA8 > EMA21 & price > EMA200)"   // ✏️ معدّل للـ ETH Edition
+        : h4Result.bias === "BEAR"
+        ? "Bearish (EMA8 < EMA21 & price < EMA200)"   // ✏️ معدّل للـ ETH Edition
         : "Neutral";
 
-    var m15Str = signal === "LONG"  ? "EMA3 Cross UP   → LONG setup"  :
-                 signal === "SHORT" ? "EMA3 Cross DOWN → SHORT setup" :
-                 "No Signal";
+    var h1Str = signal === "LONG"  ? "EMA8 Cross UP   → LONG setup"  :  // ✏️ معدّل للـ ETH Edition
+                signal === "SHORT" ? "EMA8 Cross DOWN → SHORT setup" :  // ✏️ معدّل للـ ETH Edition
+                "No Signal";
 
     var cdStr = cooldownUntil > Date.now()
         ? "ON — " + ((cooldownUntil - Date.now()) / 3600000).toFixed(1) + "h left"
@@ -690,13 +763,18 @@ function printDashboard(h4Bias, m15Result, price) {
         : (stats.grossProfit > 0 ? "∞" : "0.00");
 
     Log("╔══════════════════════════════════════════╗");
-    Log("║   THE SURGEON BOT v2 — BACKTEST          ║");
+    Log("║   THE SURGEON BOT v2 — ETH EDITION       ║");   // ✏️ معدّل للـ ETH Edition
+    Log("╠══════════════════════════════════════════╣");
+    Log("║  Strategy  : EMA8/21 H1+H4 + ADX + ATR   ║");   // ✏️ معدّل للـ ETH Edition
     Log("╠══════════════════════════════════════════╣");
     Log("║  Price     : $" + price.toFixed(4));
     Log("║  H4 Bias   : " + h4Str);
-    Log("║  M15 Signal: " + m15Str);
-    Log("║  EMA3/EMA8 : " + (isNaN(ema3) ? "---" : ema3.toFixed(4)) +
-        " / " + (isNaN(ema8) ? "---" : ema8.toFixed(4)));
+    Log("║  H4 Gap%   : " + (h4Result.ema200gap * 100).toFixed(2) +    // ✏️ معدّل للـ ETH Edition
+        "%  | H4 Candle: " + (h4Result.lastCandleBearish ? "Bear" : "Bull"));
+    Log("║  Session   : " + (isInTradingSession() ? "Active 13-16 UTC" : "Outside session"));  // ✏️ معدّل للـ ETH Edition
+    Log("║  H1 Signal : " + h1Str);                           // ✏️ معدّل للـ ETH Edition
+    Log("║  EMA8/EMA21: " + (isNaN(ema8)  ? "---" : ema8.toFixed(4)) +  // ✏️ معدّل للـ ETH Edition
+        " / " + (isNaN(ema21) ? "---" : ema21.toFixed(4)));
     Log("║  ADX (14)  : " + (isNaN(adx)  ? "---" : adx.toFixed(1)));
     Log("║  ATR (14)  : $" + (isNaN(atr) ? "---" : atr.toFixed(4)));
     Log("║  VWAP      : $" + (isNaN(vwap)? "---" : vwap.toFixed(4)));
@@ -742,14 +820,16 @@ function printDashboard(h4Bias, m15Result, price) {
 // MAIN — FMZ calls this once; it runs in an infinite loop internally
 // =====================================================================
 
+// ✏️ معدّل للـ ETH Edition
 function main() {
     Log("╔══════════════════════════════════════════╗");
-    Log("║   THE SURGEON BOT v2 — FMZ BACKTEST     ║");
+    Log("║   THE SURGEON BOT v2 — ETH EDITION      ║");   // ✏️ معدّل للـ ETH Edition
     Log("╠══════════════════════════════════════════╣");
-    Log("║  Strategy  : EMA3/8 Dual-TF + ADX + ATR  ║");
+    Log("║  Strategy  : EMA8/21 H1+H4 + ADX + ATR   ║");  // ✏️ معدّل للـ ETH Edition
     Log("║  SL / TP   : " + ATR_SL_MULT + "× ATR / " +
         ATR_TP_MULT + "× ATR  (R:R 2:1)      ║");
-    Log("║  Risk/Trade: " + (RISK_PER_TRADE * 100) + "%                          ║");
+    Log("║  Risk/Trade: " + (RISK_PER_TRADE * 100) + "%  | Session: " +
+        SESSION_START_UTC + "-" + SESSION_END_UTC + " UTC   ║");  // ✏️ معدّل للـ ETH Edition
     Log("║  Max DD    : " + (MAX_DD_PCT * 100) + "% → " +
         COOLDOWN_HOURS + "h cooldown           ║");
     Log("╚══════════════════════════════════════════╝\n");
@@ -798,34 +878,44 @@ function main() {
             continue;
         }
 
-        // ── Fetch candle data for both timeframes ───────────────
-        var recordsH4  = exchange.GetRecords(PERIOD_H4);
-        var recordsM15 = exchange.GetRecords(PERIOD_M15);
+        // ── Trading session filter ──────────────────────────────  // ✏️ معدّل للـ ETH Edition
+        if (!isInTradingSession()) {
+            var hour = new Date().getUTCHours();
+            Log("[SESSION] خارج جلسة التداول — الساعة الحالية: " +
+                hour + ":00 UTC | الجلسة: " +
+                SESSION_START_UTC + ":00 - " + SESSION_END_UTC + ":00 UTC");
+            Sleep(POLL_MS);
+            continue;
+        }
 
-        if (!recordsH4  || recordsH4.length  < 203 ||
-            !recordsM15 || recordsM15.length < 60) {
+        // ── Fetch candle data for both timeframes ───────────────
+        var recordsH4 = exchange.GetRecords(PERIOD_H4);
+        var recordsH1 = exchange.GetRecords(PERIOD_H1);   // ✏️ معدّل للـ ETH Edition (was PERIOD_M15)
+
+        if (!recordsH4 || recordsH4.length  < 230 ||      // ✏️ معدّل للـ ETH Edition
+            !recordsH1 || recordsH1.length  < 80) {       // ✏️ معدّل للـ ETH Edition
             Log("[WARN] Insufficient candle data — waiting for warmup...");
             Sleep(POLL_MS);
             continue;
         }
 
         // ── Compute signals ─────────────────────────────────────
-        var h4Bias    = getH4Bias(recordsH4);
-        var m15Result = checkM15Signal(recordsM15, h4Bias);
-        var price     = getCurrentPrice();
+        var h4Result = getH4Bias(recordsH4);               // ✏️ معدّل للـ ETH Edition (returns object)
+        var h1Result = checkH1Signal(recordsH1, h4Result); // ✏️ معدّل للـ ETH Edition
+        var price    = getCurrentPrice();
 
         // ── Print dashboard ─────────────────────────────────────
-        printDashboard(h4Bias, m15Result, price);
+        printDashboard(h4Result, h1Result, price);          // ✏️ معدّل للـ ETH Edition
 
         // ── Trade logic ─────────────────────────────────────────
         if (!currentTrade) {
-            if (m15Result.signal) {
-                Log("[SIGNAL] " + m15Result.signal +
-                    " | H4:" + h4Bias +
-                    " | ADX:" + m15Result.adx.toFixed(1) +
-                    " | ATR:$" + m15Result.atr.toFixed(2));
+            if (h1Result.signal) {
+                Log("[SIGNAL] " + h1Result.signal +
+                    " | H4:" + h4Result.bias +             // ✏️ معدّل للـ ETH Edition
+                    " | ADX:" + h1Result.adx.toFixed(1) +
+                    " | ATR:$" + h1Result.atr.toFixed(2));
 
-                var ok = executeTrade(m15Result.signal, m15Result.atr);
+                var ok = executeTrade(h1Result.signal, h1Result.atr);  // ✏️ معدّل للـ ETH Edition
                 if (ok) {
                     monitorTrade();    // blocks until TP or SL hit
                 } else {
@@ -833,8 +923,8 @@ function main() {
                     Sleep(POLL_MS);
                 }
             } else {
-                Log("[SCAN] No signal | H4:" + h4Bias +
-                    " | ADX:" + m15Result.adx.toFixed(1) +
+                Log("[SCAN] No signal | H4:" + h4Result.bias +         // ✏️ معدّل للـ ETH Edition
+                    " | ADX:" + h1Result.adx.toFixed(1) +
                     " | Flat.");
                 Sleep(POLL_MS);
             }
