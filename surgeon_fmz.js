@@ -1163,11 +1163,30 @@ function printBanner() {
 // Telegram notification helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+function fmzEncode(str) {
+    var result = "";
+    for (var i = 0; i < str.length; i++) {
+        var c = str[i];
+        if (c === " ")  { result += "%20"; }
+        else if (c === "\n") { result += "%0A"; }
+        else if (c === "&")  { result += "%26"; }
+        else if (c === "+")  { result += "%2B"; }
+        else if (c === "#")  { result += "%23"; }
+        else if (c === "%")  { result += "%25"; }
+        else if (c === "=")  { result += "%3D"; }
+        else if (c === "?")  { result += "%3F"; }
+        else if (c === "<")  { result += "%3C"; }
+        else if (c === ">")  { result += "%3E"; }
+        else { result += c; }
+    }
+    return result;
+}
+
 function sendTelegram(msg) {
     try {
         var url = "https://api.telegram.org/bot" + TELEGRAM_TOKEN +
                   "/sendMessage?chat_id=" + TELEGRAM_CHAT_ID +
-                  "&text=" + encodeURIComponent(msg) +
+                  "&text=" + fmzEncode(msg) +
                   "&parse_mode=HTML";
         HttpQuery(url);
     } catch(e) {
