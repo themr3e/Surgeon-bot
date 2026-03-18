@@ -16,7 +16,7 @@ Logic:
 FMZ functions used:
   exchange.GetRecords()      — fetch candles
   exchange.GetTicker()       — fetch current price
-  exchange.SetContractType() — set symbol
+  exchange.IO("currency", sym) + exchange.SetContractType("swap") — set symbol
   exchange.Buy()             — buy order
   exchange.Sell()            — sell order
   exchange.GetAccount()      — fetch balance
@@ -405,8 +405,9 @@ function scanSymbols() {
         var fmzSym = activeSymbols[i];
 
         try {
-            // Set symbol in FMZ
-            exchange.SetContractType(fmzSym);
+            // Set symbol in FMZ (currency first, then perpetual swap type)
+            exchange.IO("currency", fmzSym);
+            exchange.SetContractType("swap");
 
             // Fetch candles
             var records = exchange.GetRecords(TIMEFRAME);
@@ -640,7 +641,8 @@ function executeTrade(signal) {
     // 1. Set symbol in FMZ
     // ────────────────────────────────────────
     try {
-        exchange.SetContractType(fmzSym);
+        exchange.IO("currency", fmzSym);
+        exchange.SetContractType("swap");
     } catch (e) {
         Log("[ERROR] Failed to set contract:", fmzSym, e.message);
         return false;
@@ -872,7 +874,7 @@ function monitorTrade() {
         " | SL: $" + slPrice.toFixed(6));
 
     // Confirm symbol in FMZ before monitoring
-    try { exchange.SetContractType(symbol); } catch (e) {}
+    try { exchange.IO("currency", symbol); exchange.SetContractType("swap"); } catch (e) {}
 
     // ─────────────────────────────────────────
     // Monitoring loop — runs until trade closes
@@ -1173,7 +1175,7 @@ function main() {
             Log("[RESUME] Resuming monitor on existing trade:", currentTrade.symbol);
 
             // Confirm symbol is set
-            try { exchange.SetContractType(currentTrade.symbol); } catch (e) {}
+            try { exchange.IO("currency", currentTrade.symbol); exchange.SetContractType("swap"); } catch (e) {}
 
             monitorTrade();
         }
