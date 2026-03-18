@@ -24,7 +24,7 @@ STRATEGY:
              + H1 price above VWAP
              + H1 ADX > 25
              + H1 ATR > avg ATR(20)
-             + Session: 12:00–17:00 UTC only
+             + No session filter — trades 24H
 
   ─ Short : H4 EMA8 < EMA21 AND price < EMA200
              + H4 gap to EMA200 > 1% (clear distance)
@@ -33,7 +33,7 @@ STRATEGY:
              + H1 price below VWAP
              + H1 ADX > 25
              + H1 ATR > avg ATR(20)
-             + Session: 12:00–17:00 UTC only
+             + No session filter — trades 24H
 
   Stop Loss  : entry ± 2.0 × ATR(14)
   Take Profit: entry ± 4.0 × ATR(14)   ← R:R = 2:1
@@ -72,8 +72,8 @@ var LEVERAGE        = 10;      // leverage (set same in FMZ backtest config)
 var RISK_PER_TRADE  = 0.02;    // 2% of balance risked per trade
 
 var ATR_PERIOD      = 14;      // ATR period
-var ATR_SL_MULT     = 2.0;     // stop loss  = 2.0 × ATR from entry  // ETH Edition
-var ATR_TP_MULT     = 4.0;     // take profit = 4.0 × ATR from entry  (R:R 2:1)  // ETH Edition
+var ATR_SL_MULT     = 2.5;    // wider SL prevents fast noise-closes
+var ATR_TP_MULT     = 5.0;    // maintains R:R 2:1
 
 var ADX_PERIOD      = 14;      // ADX calculation period
 var ADX_MIN         = 20;      // minimum ADX value to allow entry  // ETH Edition
@@ -84,10 +84,6 @@ var COOLDOWN_HOURS  = 12;      // hours to pause after max DD hit
 var POLL_MS         = 3600000; // H1 candle duration in ms
                                // advances exactly one H1 candle per loop cycle
                                // matches backtest resolution perfectly
-
-// ── Trading Session Filter ───────────────────────────────────────────
-var SESSION_START_UTC = 12;    // 12:00 PM UTC — session opens
-var SESSION_END_UTC   = 17;    // 5:00 PM UTC — session closes
 
 // ── Realistic Cost Simulation ─────────────────────────────────────────
 var MAKER_FEE      = 0.0002;   // 0.02% per side (Binance Futures maker)
@@ -126,15 +122,6 @@ function floorTo(val, decimals) {
 // Format number with leading sign for display
 function signStr(val) {
     return val >= 0 ? "+" : "";
-}
-
-// ── Trading Session Check ─────────────────────────────────────────────
-// Returns true only during the 12:00–17:00 UTC trading window.
-// candleTimeMs: timestamp of the last closed H1 candle (from records[].Time)
-// Using candle time — not new Date() — ensures correct behaviour in backtest.
-function isInTradingSession(candleTimeMs) {
-    var hour = new Date(candleTimeMs).getUTCHours();
-    return hour >= SESSION_START_UTC && hour < SESSION_END_UTC;
 }
 
 // =====================================================================
@@ -365,7 +352,9 @@ function getH4Bias(recordsH4) {
 // Condition 3 : ADX > ADX_MIN (20)
 // Condition 4 : Current ATR > 20-period ATR average (volatility expansion)
 // Condition 5 : H4 bias matches direction (passed as h4Result object)
-// Condition 6 : SHORT only — H4 EMA200 gap > 1% AND last H4 candle bearish
+// Condition 6 : SHORT only — H4 EMA200 gap > 0.5%
+// Condition 7 : Momentum — current H1 candle body in signal direction
+// Condition 8 : EMA8 slope — EMA8 trending in signal direction (3-bar lookback)
 //
 // Returns { signal: "LONG"|"SHORT"|null, atr, adx, vwap, ema8, ema21 }
 // ETH Edition
@@ -405,6 +394,7 @@ function checkH1Signal(recordsH1, h4Result) {
     if (atr <= 0) return empty;
 
     var close = recs[cur].Close;
+    var open  = recs[cur].Open;
 
     // ── Condition 1: Fresh EMA8/EMA21 crossover ──  // ETH Edition
     // Cross UP:   previous EMA8 ≤ EMA21, current EMA8 > EMA21
@@ -422,16 +412,33 @@ function checkH1Signal(recordsH1, h4Result) {
     // ── Condition 4: ATR volatility expansion ──
     var atrSpike = atr > atrSMA;
 
-    // ── Condition 6: SHORT extra filter — H4 EMA200 gap > 0.5% only ──
-    // lastCandleBearish removed — combined with other filters it was
-    // too restrictive and produced near-zero SHORT signals on ETH.
+    // ── Condition 6: SHORT extra filter — H4 EMA200 gap > 0.5% ──
     var shortGapOk = h4Result.ema200gap > 0.005;
+
+    // ── Condition 7: Momentum confirmation ──
+    // Current H1 candle must move in the signal direction.
+    // Prevents entries mid-bounce (SHORT) or mid-pullback (LONG).
+    // LONG  requires a bullish candle: Close > Open
+    // SHORT requires a bearish candle: Close < Open
+    var bullCandle = close > open;
+    var bearCandle = close < open;
+
+    // ── Condition 8: EMA8 slope confirmation ──
+    // EMA8 itself must be sloping in the signal direction
+    // over the last 3 candles — filters entries against momentum.
+    // Need at least cur-3 to be valid
+    var ema8SlopeUp   = (cur >= 3) && !isNaN(ema8Arr[cur-3]) &&
+                        (e8c > ema8Arr[cur-3]);
+    var ema8SlopeDown = (cur >= 3) && !isNaN(ema8Arr[cur-3]) &&
+                        (e8c < ema8Arr[cur-3]);
 
     // ── Signal: all conditions + H4 bias agreement ──
     var signal = null;
-    if (h4Result.bias === "BULL" && crossUp   && aboveVWAP && adxOk && atrSpike)
+    if (h4Result.bias === "BULL" && crossUp   && aboveVWAP &&
+        adxOk && atrSpike && bullCandle && ema8SlopeUp)
         signal = "LONG";
-    if (h4Result.bias === "BEAR" && crossDown && belowVWAP && adxOk && atrSpike && shortGapOk)
+    if (h4Result.bias === "BEAR" && crossDown && belowVWAP &&
+        adxOk && atrSpike && shortGapOk && bearCandle && ema8SlopeDown)
         signal = "SHORT";
 
     return { signal: signal, atr: atr, adx: adx, vwap: vwap, ema8: e8c, ema21: e21c };
@@ -751,7 +758,7 @@ function monitorTrade() {
 // DASHBOARD — printed each scan cycle
 // =====================================================================
 
-function printDashboard(h4Result, h1Result, price, lastCandleTime) {
+function printDashboard(h4Result, h1Result, price) {
     var signal = h1Result.signal;
     var adx    = h1Result.adx;
     var atr    = h1Result.atr;
@@ -788,13 +795,12 @@ function printDashboard(h4Result, h1Result, price, lastCandleTime) {
     Log("║   THE SURGEON BOT v2 — ETH EDITION       ║");   // ETH Edition
     Log("╠══════════════════════════════════════════╣");
     Log("║  Strategy  : EMA8/21 H1+H4 + ADX + ATR   ║");   // ETH Edition
+    Log("║  Mode      : 24H — No Session Filter      ║");
     Log("╠══════════════════════════════════════════╣");
     Log("║  Price     : $" + price.toFixed(4));
     Log("║  H4 Bias   : " + h4Str);
     Log("║  H4 Gap%   : " + (h4Result.ema200gap * 100).toFixed(2) +    // ETH Edition
         "%  | H4 Candle: " + (h4Result.lastCandleBearish ? "Bear" : "Bull"));
-    Log("║  Session   : " + (isInTradingSession(lastCandleTime) ?
-        "Active 13-16 UTC" : "Outside session"));
     Log("║  H1 Signal : " + h1Str);                           // ETH Edition
     Log("║  EMA8/EMA21: " + (isNaN(ema8)  ? "---" : ema8.toFixed(4)) +  // ETH Edition
         " / " + (isNaN(ema21) ? "---" : ema21.toFixed(4)));
@@ -851,8 +857,7 @@ function main() {
     Log("║  Strategy  : EMA8/21 H1+H4 + ADX + ATR   ║");  // ETH Edition
     Log("║  SL / TP   : " + ATR_SL_MULT + "× ATR / " +
         ATR_TP_MULT + "× ATR  (R:R 2:1)      ║");
-    Log("║  Risk/Trade: " + (RISK_PER_TRADE * 100) + "%  | Session: " +
-        SESSION_START_UTC + "-" + SESSION_END_UTC + " UTC   ║");  // ETH Edition
+    Log("║  Risk/Trade: " + (RISK_PER_TRADE * 100) + "% | Mode: 24H No Filter ║");
     Log("║  Max DD    : " + (MAX_DD_PCT * 100) + "% → " +
         COOLDOWN_HOURS + "h cooldown           ║");
     Log("╚══════════════════════════════════════════╝\n");
@@ -901,27 +906,9 @@ function main() {
             continue;
         }
 
-        // ── Session pre-check — lightweight fetch before full data load ──
-        // Fetches only H1 records to get current candle time.
-        // Avoids expensive H4 fetch during off-session hours.
-        var sessionRecs = exchange.GetRecords(PERIOD_H1);
-        if (!sessionRecs || sessionRecs.length < 2) {
-            Sleep(POLL_MS);
-            continue;
-        }
-        var lastH1Candle = sessionRecs[sessionRecs.length - 2];
-        if (!isInTradingSession(lastH1Candle.Time)) {
-            var sessionHour = new Date(lastH1Candle.Time).getUTCHours();
-            Log("[SESSION] Outside window — hour: " + sessionHour +
-                ":00 UTC | Window: " + SESSION_START_UTC +
-                ":00 - " + SESSION_END_UTC + ":00 UTC");
-            Sleep(POLL_MS);
-            continue;
-        }
-
-        // ── Full candle fetch — only runs during active session ──
+        // ── Fetch candle data for both timeframes — 24H no session filter ──
         var recordsH4 = exchange.GetRecords(PERIOD_H4);
-        var recordsH1 = sessionRecs; // reuse already-fetched H1 data
+        var recordsH1 = exchange.GetRecords(PERIOD_H1);
 
         if (!recordsH4 || recordsH4.length < 230 ||
             !recordsH1 || recordsH1.length < 80) {
@@ -938,7 +925,7 @@ function main() {
         // ── Print dashboard — only on signal or open trade ──────
         // Limits log output to avoid FMZ 8000-line log cap.
         if (h1Result.signal || currentTrade) {
-            printDashboard(h4Result, h1Result, price, lastH1Candle.Time);
+            printDashboard(h4Result, h1Result, price);
         } else {
             Log("[SCAN] No signal | H4:" + h4Result.bias +
                 " | ADX:" + h1Result.adx.toFixed(1) +
@@ -952,27 +939,13 @@ function main() {
                 Log("[SIGNAL] " + h1Result.signal +
                     " | H4:" + h4Result.bias +             // ETH Edition
                     " | ADX:" + h1Result.adx.toFixed(1) +
-                    " | ATR:$" + h1Result.atr.toFixed(2));
+                    " | ATR:$" + h1Result.atr.toFixed(2) +
+                    " | Gap:" + (h4Result.ema200gap * 100).toFixed(2) + "%");
 
                 var ok = executeTrade(h1Result.signal, h1Result.atr);  // ETH Edition
                 if (ok) {
                     monitorTrade();    // blocks until TP or SL hit
 
-                    // After trade closes, re-check session window.
-                    // monitorTrade() can run for many hours — by the
-                    // time it returns, the session may have expired.
-                    // Re-fetch latest H1 candle for accurate time check.
-                    var postTradeRecs = exchange.GetRecords(PERIOD_H1);
-                    if (postTradeRecs && postTradeRecs.length >= 2) {
-                        var postCandle = postTradeRecs[postTradeRecs.length - 2];
-                        if (!isInTradingSession(postCandle.Time)) {
-                            var postHour = new Date(postCandle.Time).getUTCHours();
-                            Log("[SESSION] Trade closed outside window — hour: " +
-                                postHour + ":00 UTC. Waiting for next session.");
-                            Sleep(POLL_MS);
-                            continue;
-                        }
-                    }
                 } else {
                     Log("[WARN] Trade execution failed — retrying next cycle.");
                     Sleep(POLL_MS);
@@ -988,18 +961,6 @@ function main() {
             Log("[RESUME] Resuming trade monitor...");
             monitorTrade();
 
-            // Re-check session after resumed trade closes
-            var resumeRecs = exchange.GetRecords(PERIOD_H1);
-            if (resumeRecs && resumeRecs.length >= 2) {
-                var resumeCandle = resumeRecs[resumeRecs.length - 2];
-                if (!isInTradingSession(resumeCandle.Time)) {
-                    var resumeHour = new Date(resumeCandle.Time).getUTCHours();
-                    Log("[SESSION] Resumed trade closed outside window — hour: " +
-                        resumeHour + ":00 UTC. Waiting for next session.");
-                    Sleep(POLL_MS);
-                    continue;
-                }
-            }
         }
     }
 }
