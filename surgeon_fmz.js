@@ -36,10 +36,10 @@ var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
 var LEVERAGE             = 10;         // Leverage
 var RISK_PER_TRADE_PCT   = 0.02;       // Risk 2% of balance per trade
 var MAX_ORDER_USDT       = 200;        // Hard cap: never put more than $200 into one trade
-var TP_PCT_LONG          = 1.020;      // Take profit for long  (+2%)
-var TP_PCT_SHORT         = 0.980;      // Take profit for short (-2%)
-var SL_PCT_LONG          = 0.993;      // Stop loss for long    (-0.7%)
-var SL_PCT_SHORT         = 1.007;      // Stop loss for short   (+0.7%)
+var TP_PCT_LONG          = 1.060;      // Take profit for long  (+6%)
+var TP_PCT_SHORT         = 0.940;      // Take profit for short (-6%)
+var SL_PCT_LONG          = 0.980;      // Stop loss for long    (-2%)
+var SL_PCT_SHORT         = 1.020;      // Stop loss for short   (+2%)
 var MAX_TRADE_MINUTES    = 20;         // Max trade duration in minutes
 var SCAN_INTERVAL_MS     = 30000;      // Scan interval in ms (30 seconds)
 var SYMBOL_DELAY_MS      = 200;        // Delay between symbols to avoid rate limit
@@ -551,53 +551,6 @@ function getDecimals(stepSize) {
 // Place TP/SL Orders via Binance API
 // =====================================================================
 
- // Place TAKE_PROFIT_MARKET order via Binance Futures API
- // Returns order ID or null on failure
-function placeTakeProfitOrder(binanceSym, side, stopPrice) {
-    try {
-        var result = exchange.IO("api", "POST", "/fapi/v1/order",
-            "symbol=" + binanceSym +
-            "&side=" + side +
-            "&type=TAKE_PROFIT_MARKET" +
-            "&stopPrice=" + stopPrice +
-            "&closePosition=true" +
-            "&workingType=CONTRACT_PRICE" +
-            "&timeInForce=GTE_GTC"
-        );
-        if (result && result.orderId) {
-            Log("[TP] Take Profit order placed: #" + result.orderId +
-                " at $" + stopPrice);
-            return result.orderId;
-        }
-    } catch (e) {
-        Log("[ERROR] Failed to place TP:", e.message || e);
-    }
-    return null;
-}
-
- // Place STOP_MARKET order via Binance Futures API
- // Returns order ID or null on failure
-function placeStopLossOrder(binanceSym, side, stopPrice) {
-    try {
-        var result = exchange.IO("api", "POST", "/fapi/v1/order",
-            "symbol=" + binanceSym +
-            "&side=" + side +
-            "&type=STOP_MARKET" +
-            "&stopPrice=" + stopPrice +
-            "&closePosition=true" +
-            "&workingType=CONTRACT_PRICE" +
-            "&timeInForce=GTE_GTC"
-        );
-        if (result && result.orderId) {
-            Log("[SL] Stop Loss order placed: #" + result.orderId +
-                " at $" + stopPrice);
-            return result.orderId;
-        }
-    } catch (e) {
-        Log("[ERROR] Failed to place SL:", e.message || e);
-    }
-    return null;
-}
 
  // Cancel a specific order via Binance Futures API
 function cancelOrderById(binanceSym, orderId) {
@@ -612,15 +565,6 @@ function cancelOrderById(binanceSym, orderId) {
     }
 }
 
- // Cancel pending TP and SL orders for the current trade
-function cancelTpSl() {
-    if (!currentTrade) return;
-    var binSym = fmzToBinance(currentTrade.symbol);
-    cancelOrderById(binSym, currentTrade.tpOrderId);
-    cancelOrderById(binSym, currentTrade.slOrderId);
-    currentTrade.tpOrderId = null;
-    currentTrade.slOrderId = null;
-}
 
 // =====================================================================
 // Set Leverage
@@ -811,8 +755,6 @@ function executeTrade(signal) {
     // ────────────────────────────────────────
     var closeSide = (dir === "LONG") ? "SELL" : "BUY";
 
-    var tpOrderId = placeTakeProfitOrder(binSym, closeSide, tpPrice.toFixed(priceDec));
-    var slOrderId = placeStopLossOrder  (binSym, closeSide, slPrice.toFixed(priceDec));
 
     // ────────────────────────────────────────
     // 8. Save trade info to global variable
@@ -824,8 +766,6 @@ function executeTrade(signal) {
         entryPrice: fillPrice,
         tpPrice:    tpPrice,
         slPrice:    slPrice,
-        tpOrderId:  tpOrderId,
-        slOrderId:  slOrderId,
         entryTime:  Date.now(),
         open:       true
     };
@@ -942,42 +882,58 @@ function monitorTrade() {
         // Check timeout
         if (elapsed >= maxMs) {
             Log("[TIMEOUT] Trade exceeded " + MAX_TRADE_MINUTES + " min — closing...");
-            cancelTpSl();
             closePositionMarket();
             closePrice  = getCurrentPrice();
             closeReason = "TIMEOUT";
             break;
         }
 
-        // Check position status
-        var posOpen = isPositionOpen();
-        if (!posOpen) {
-            // Position closed by TP or SL automatically
-            var curPrice = getCurrentPrice();
+        // Internal price-based TP/SL monitoring
+        var curPrice = getCurrentPrice();
+        if (curPrice <= 0) {
+            Sleep(POSITION_POLL_MS);
+            continue;
+        }
 
-            // Determine close reason based on direction and price
-            if (dir === "LONG") {
-                if (curPrice >= tpPrice * 0.999) {
-                    closeReason = "TP";
-                    closePrice  = tpPrice;
-                } else {
-                    closeReason = "SL";
-                    closePrice  = slPrice;
-                }
-            } else {
-                if (curPrice <= tpPrice * 1.001) {
-                    closeReason = "TP";
-                    closePrice  = tpPrice;
-                } else {
-                    closeReason = "SL";
-                    closePrice  = slPrice;
-                }
+        if (dir === "LONG") {
+            if (curPrice >= tpPrice) {
+                Log("[TP HIT] Price " + curPrice + " >= TP " + tpPrice + " — closing LONG");
+                closePositionMarket();
+                closePrice  = tpPrice;
+                closeReason = "TP";
+                break;
             }
+            if (curPrice <= slPrice) {
+                Log("[SL HIT] Price " + curPrice + " <= SL " + slPrice + " — closing LONG");
+                closePositionMarket();
+                closePrice  = slPrice;
+                closeReason = "SL";
+                break;
+            }
+        }
 
-            // Cancel any remaining orders
-            cancelTpSl();
-            Log("[CLOSED] Trade closed by: " + closeReason +
-                " | Price: $" + closePrice.toFixed(6));
+        if (dir === "SHORT") {
+            if (curPrice <= tpPrice) {
+                Log("[TP HIT] Price " + curPrice + " <= TP " + tpPrice + " — closing SHORT");
+                closePositionMarket();
+                closePrice  = tpPrice;
+                closeReason = "TP";
+                break;
+            }
+            if (curPrice >= slPrice) {
+                Log("[SL HIT] Price " + curPrice + " >= SL " + slPrice + " — closing SHORT");
+                closePositionMarket();
+                closePrice  = slPrice;
+                closeReason = "SL";
+                break;
+            }
+        }
+
+        // Safety fallback — position found closed externally
+        if (!isPositionOpen()) {
+            closeReason = "UNKNOWN";
+            closePrice  = curPrice;
+            Log("[CLOSED] Position closed externally — reason UNKNOWN");
             break;
         }
 
@@ -985,8 +941,7 @@ function monitorTrade() {
         var remaining = maxMs - elapsed;
         var mins = Math.floor(remaining / 60000);
         var secs = Math.floor((remaining % 60000) / 1000);
-        var curP = getCurrentPrice();
-        Log("[MONITOR] Price: $" + curP.toFixed(6) +
+        Log("[MONITOR] Price: $" + curPrice.toFixed(6) +
             " | Time left: " + mins + "m " + secs + "s");
 
         Sleep(POSITION_POLL_MS);
@@ -1094,8 +1049,8 @@ function printDashboard() {
     var symDisp    = inTrade ? currentTrade.symbol    : "---";
     var dirDisp    = inTrade ? currentTrade.direction : "---";
     var entryDisp  = inTrade ? "$" + currentTrade.entryPrice.toFixed(2) : "---";
-    var tpDisp     = inTrade ? "$" + currentTrade.tpPrice.toFixed(2) + " (+2.0%)" : "---";
-    var slDisp     = inTrade ? "$" + currentTrade.slPrice.toFixed(2) + " (-0.7%)" : "---";
+    var tpDisp     = inTrade ? "$" + currentTrade.tpPrice.toFixed(2) + " (+6.0%)" : "---";
+    var slDisp     = inTrade ? "$" + currentTrade.slPrice.toFixed(2) + " (-2.0%)" : "---";
 
     var timeDisp = "---";
     if (inTrade) {
