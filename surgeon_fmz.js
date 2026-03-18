@@ -74,23 +74,19 @@ var lastDashboardPrint = 0;   // وقت آخر طباعة للوحة
 // FMZ تستخدم: "BTC_USDT"  |  Binance API تستخدم: "BTCUSDT"
 // =====================================================================
 
-/*
- * تحويل صيغة Binance API إلى صيغة FMZ
- * مثال: "BTCUSDT" -> "BTC_USDT"
- */
+ // تحويل صيغة Binance API إلى صيغة FMZ
+ // مثال: "BTCUSDT" -> "BTC_USDT"
 function binanceToFmz(binanceSymbol) {
     // نزيل "USDT" من النهاية ثم نضيف "_USDT"
-    if (binanceSymbol.endsWith("USDT")) {
+    if (binanceSymbol.slice(-4) === "USDT") {
         var base = binanceSymbol.slice(0, -4); // إزالة آخر 4 أحرف "USDT"
         return base + "_USDT";
     }
     return binanceSymbol;
 }
 
-/*
- * تحويل صيغة FMZ إلى صيغة Binance API
- * مثال: "BTC_USDT" -> "BTCUSDT"
- */
+ // تحويل صيغة FMZ إلى صيغة Binance API
+ // مثال: "BTC_USDT" -> "BTCUSDT"
 function fmzToBinance(fmzSymbol) {
     return fmzSymbol.replace("_", "");
 }
@@ -99,10 +95,8 @@ function fmzToBinance(fmzSymbol) {
 // استدعاء API مع إعادة المحاولة — API Call with Retry
 // =====================================================================
 
-/*
- * تنفيذ دالة مع إعادة المحاولة 3 مرات عند الفشل
- * يستقبل دالة (fn) وسيتم تنفيذها حتى تنجح أو تستنفذ المحاولات
- */
+ // تنفيذ دالة مع إعادة المحاولة 3 مرات عند الفشل
+ // يستقبل دالة (fn) وسيتم تنفيذها حتى تنجح أو تستنفذ المحاولات
 function retryCall(fn, maxRetries, delayMs) {
     maxRetries = maxRetries || 3;
     delayMs    = delayMs    || 2000;
@@ -127,11 +121,9 @@ function retryCall(fn, maxRetries, delayMs) {
 // جلب أفضل 200 رمز حسب الحجم — Fetch Top 200 Symbols by Volume
 // =====================================================================
 
-/*
- * جلب بيانات 24 ساعة لجميع رموز Binance Futures
- * ثم تصفية وترتيب حسب حجم التداول، وإعادة أعلى TOP_SYMBOLS_COUNT رمزاً
- * يستخدم Binance Futures REST API مباشرة عبر exchange.IO
- */
+ // جلب بيانات 24 ساعة لجميع رموز Binance Futures
+ // ثم تصفية وترتيب حسب حجم التداول، وإعادة أعلى TOP_SYMBOLS_COUNT رمزاً
+ // يستخدم Binance Futures REST API مباشرة عبر exchange.IO
 function fetchTopSymbols() {
     Log("[رموز] جاري تحديث قائمة الرموز...");
 
@@ -152,7 +144,7 @@ function fetchTopSymbols() {
         var sym = t.symbol; // مثال: "BTCUSDT"
 
         // فقط رموز تنتهي بـ USDT
-        if (!sym || !sym.endsWith("USDT")) {
+        if (!sym || sym.slice(-4) !== "USDT") {
             continue;
         }
 
@@ -191,9 +183,7 @@ function fetchTopSymbols() {
     return top;
 }
 
-/*
- * تحديث قائمة الرموز إذا مضى أكثر من SYMBOL_REFRESH_HOURS ساعات
- */
+ // تحديث قائمة الرموز إذا مضى أكثر من SYMBOL_REFRESH_HOURS ساعات
 function maybeRefreshSymbols() {
     var now = Date.now();
     if (now - symbolsLastUpdated >= SYMBOL_REFRESH_HOURS * 3600 * 1000) {
@@ -209,12 +199,10 @@ function maybeRefreshSymbols() {
 // حساب المؤشرات التقنية — Technical Indicators
 // =====================================================================
 
-/*
- * حساب VWAP يدوياً (FMZ لا تتضمن VWAP في مكتبة TA)
- * VWAP = Σ(TypicalPrice × Volume) / Σ(Volume)
- * السعر النموذجي = (High + Low + Close) / 3
- * نحسب VWAP تراكمياً على كامل مجموعة البيانات (كل يوم)
- */
+ // حساب VWAP يدوياً (FMZ لا تتضمن VWAP في مكتبة TA)
+ // VWAP = Σ(TypicalPrice × Volume) / Σ(Volume)
+ // السعر النموذجي = (High + Low + Close) / 3
+ // نحسب VWAP تراكمياً على كامل مجموعة البيانات (كل يوم)
 function calcVWAP(records) {
     var vwapArr = [];
     var cumTPV  = 0; // تراكم (السعر النموذجي × الحجم)
@@ -246,9 +234,7 @@ function calcVWAP(records) {
     return vwapArr; // مصفوفة بنفس حجم records
 }
 
-/*
- * حساب متوسط متحرك بسيط للحجم (SMA 20)
- */
+ // حساب متوسط متحرك بسيط للحجم (SMA 20)
 function calcVolSMA(records, period) {
     var result = [];
     for (var i = 0; i < records.length; i++) {
@@ -269,16 +255,13 @@ function calcVolSMA(records, period) {
 // فحص شروط الإشارة الخمسة — Five-Condition Signal Check
 // =====================================================================
 
-/*
- * فحص الشروط الخمسة على مجموعة الشمعات المغلقة:
- *   1. تقاطع EMA9 مع EMA21
- *   2. RSI(14) في النطاق المحدد
- *   3. السعر فوق/تحت VWAP
- *   4. ارتفاع الحجم أكثر من 1.5× المتوسط
- *   5. تقاطع خط MACD مع خط الإشارة (في آخر شمعتين)
- *
- * يُعيد: "LONG" أو "SHORT" أو null
- */
+ // فحص الشروط الخمسة على مجموعة الشمعات المغلقة:
+ //   1. تقاطع EMA9 مع EMA21
+ //   2. RSI(14) في النطاق المحدد
+ //   3. السعر فوق/تحت VWAP
+ //   4. ارتفاع الحجم أكثر من 1.5× المتوسط
+ //   5. تقاطع خط MACD مع خط الإشارة (في آخر شمعتين)
+ // يُعيد: "LONG" أو "SHORT" أو null
 function checkSignal(records) {
     // نحتاج على الأقل 30 شمعة للحساب الموثوق
     if (!records || records.length < 30) return null;
@@ -393,10 +376,8 @@ function checkSignal(records) {
 // دورة مسح الرموز — Symbol Scanning Cycle
 // =====================================================================
 
-/*
- * مسح جميع الرموز النشطة للبحث عن إشارات صالحة
- * يُعيد: كائن الإشارة الأفضل (الأعلى حجماً) أو null إذا لا توجد إشارات
- */
+ // مسح جميع الرموز النشطة للبحث عن إشارات صالحة
+ // يُعيد: كائن الإشارة الأفضل (الأعلى حجماً) أو null إذا لا توجد إشارات
 function scanSymbols() {
     var now = new Date();
     Log("\n[مسح] بدء مسح", activeSymbols.length, "رمزاً...",
@@ -466,19 +447,15 @@ function scanSymbols() {
 // الحصول على دقة الكمية — Get Amount Precision
 // =====================================================================
 
-/*
- * تقريب القيمة للأسفل بعدد المنازل العشرية المحددة
- * لتجنب رفض الأمر بسبب الدقة الزائدة
- */
+ // تقريب القيمة للأسفل بعدد المنازل العشرية المحددة
+ // لتجنب رفض الأمر بسبب الدقة الزائدة
 function floorTo(value, decimals) {
     var factor = Math.pow(10, decimals);
     return Math.floor(value * factor) / factor;
 }
 
-/*
- * الحصول على الحد الأدنى للكمية والخطوة من Binance Futures
- * يستخدم /fapi/v1/exchangeInfo
- */
+ // الحصول على الحد الأدنى للكمية والخطوة من Binance Futures
+ // يستخدم /fapi/v1/exchangeInfo
 function getSymbolStepSize(binanceSym) {
     try {
         var info = exchange.IO("api", "GET", "/fapi/v1/exchangeInfo");
@@ -508,10 +485,8 @@ function getSymbolStepSize(binanceSym) {
     return { stepSize: 0.001, pricePrecision: 2 };
 }
 
-/*
- * حساب عدد المنازل العشرية من قيمة stepSize
- * مثال: 0.001 -> 3 | 0.01 -> 2 | 1 -> 0
- */
+ // حساب عدد المنازل العشرية من قيمة stepSize
+ // مثال: 0.001 -> 3 | 0.01 -> 2 | 1 -> 0
 function getDecimals(stepSize) {
     if (stepSize >= 1) return 0;
     var s = stepSize.toString();
@@ -524,10 +499,8 @@ function getDecimals(stepSize) {
 // وضع أوامر TP و SL عبر Binance API — Place TP/SL Orders via API
 // =====================================================================
 
-/*
- * وضع أمر TAKE_PROFIT_MARKET عبر Binance Futures API مباشرة
- * يُعيد معرف الأمر أو null عند الفشل
- */
+ // وضع أمر TAKE_PROFIT_MARKET عبر Binance Futures API مباشرة
+ // يُعيد معرف الأمر أو null عند الفشل
 function placeTakeProfitOrder(binanceSym, side, stopPrice) {
     try {
         var result = exchange.IO("api", "POST", "/fapi/v1/order",
@@ -550,10 +523,8 @@ function placeTakeProfitOrder(binanceSym, side, stopPrice) {
     return null;
 }
 
-/*
- * وضع أمر STOP_MARKET عبر Binance Futures API مباشرة
- * يُعيد معرف الأمر أو null عند الفشل
- */
+ // وضع أمر STOP_MARKET عبر Binance Futures API مباشرة
+ // يُعيد معرف الأمر أو null عند الفشل
 function placeStopLossOrder(binanceSym, side, stopPrice) {
     try {
         var result = exchange.IO("api", "POST", "/fapi/v1/order",
@@ -576,9 +547,7 @@ function placeStopLossOrder(binanceSym, side, stopPrice) {
     return null;
 }
 
-/*
- * إلغاء أمر محدد عبر Binance Futures API
- */
+ // إلغاء أمر محدد عبر Binance Futures API
 function cancelOrderById(binanceSym, orderId) {
     if (!orderId) return;
     try {
@@ -591,9 +560,7 @@ function cancelOrderById(binanceSym, orderId) {
     }
 }
 
-/*
- * إلغاء أوامر TP و SL المعلقة للصفقة الحالية
- */
+ // إلغاء أوامر TP و SL المعلقة للصفقة الحالية
 function cancelTpSl() {
     if (!currentTrade) return;
     var binSym = fmzToBinance(currentTrade.symbol);
@@ -607,10 +574,8 @@ function cancelTpSl() {
 // تعيين الرافعة المالية — Set Leverage
 // =====================================================================
 
-/*
- * تعيين الرافعة المالية لرمز معين عبر Binance API
- * يُعيد true عند النجاح، false عند الفشل
- */
+ // تعيين الرافعة المالية لرمز معين عبر Binance API
+ // يُعيد true عند النجاح، false عند الفشل
 function setLeverage(binanceSym, leverage) {
     try {
         exchange.IO("api", "POST", "/fapi/v1/leverage",
@@ -623,9 +588,7 @@ function setLeverage(binanceSym, leverage) {
     }
 }
 
-/*
- * تعيين وضع الهامش المعزول (Isolated) لرمز معين
- */
+ // تعيين وضع الهامش المعزول (Isolated) لرمز معين
 function setIsolatedMargin(binanceSym) {
     try {
         exchange.IO("api", "POST", "/fapi/v1/marginType",
@@ -644,15 +607,12 @@ function setIsolatedMargin(binanceSym) {
 // تنفيذ الصفقة — Trade Execution
 // =====================================================================
 
-/*
- * تنفيذ الصفقة كاملةً:
- *   1. تعيين الرافعة ونوع الهامش
- *   2. جلب الرصيد وحساب حجم المركز (مضاعفة كاملة)
- *   3. تنفيذ أمر سوق
- *   4. وضع أوامر TP و SL
- *
- * يُعيد true عند النجاح، false عند الفشل
- */
+ // تنفيذ الصفقة كاملةً:
+ //   1. تعيين الرافعة ونوع الهامش
+ //   2. جلب الرصيد وحساب حجم المركز (مضاعفة كاملة)
+ //   3. تنفيذ أمر سوق
+ //   4. وضع أوامر TP و SL
+ // يُعيد true عند النجاح، false عند الفشل
 function executeTrade(signal) {
     var fmzSym  = signal.symbol;
     var dir     = signal.direction; // "LONG" أو "SHORT"
@@ -814,10 +774,8 @@ function executeTrade(signal) {
 // فحص حالة المركز — Check Position Status
 // =====================================================================
 
-/*
- * التحقق من أن المركز لا يزال مفتوحاً
- * يُعيد true إذا كان المركز مفتوحاً، false إذا أُغلق
- */
+ // التحقق من أن المركز لا يزال مفتوحاً
+ // يُعيد true إذا كان المركز مفتوحاً، false إذا أُغلق
 function isPositionOpen() {
     try {
         var positions = exchange.GetPosition();
@@ -838,17 +796,13 @@ function isPositionOpen() {
     }
 }
 
-/*
- * جلب السعر الحالي للرمز النشط
- */
+ // جلب السعر الحالي للرمز النشط
 function getCurrentPrice() {
     var ticker = retryCall(function () { return exchange.GetTicker(); });
     return ticker ? ticker.Last : 0;
 }
 
-/*
- * إغلاق المركز المفتوح بأمر سوق (للتايم-أوت أو الإيقاف الطارئ)
- */
+ // إغلاق المركز المفتوح بأمر سوق (للتايم-أوت أو الإيقاف الطارئ)
 function closePositionMarket() {
     if (!currentTrade) return;
 
@@ -877,14 +831,11 @@ function closePositionMarket() {
 // مراقبة الصفقة — Trade Monitoring
 // =====================================================================
 
-/*
- * مراقبة الصفقة المفتوحة حتى إغلاقها بأحد الأسباب:
- *   - TP  : وصل السعر لهدف الربح
- *   - SL  : وصل السعر لوقف الخسارة
- *   - TIMEOUT: تجاوزت الصفقة MAX_TRADE_MINUTES دقيقة
- *
- * بعد الإغلاق: يُحدث الإحصائيات ويطبع النتيجة ويُسجّل الربح في FMZ
- */
+ // مراقبة الصفقة المفتوحة حتى إغلاقها بأحد الأسباب:
+ //   - TP  : وصل السعر لهدف الربح
+ //   - SL  : وصل السعر لوقف الخسارة
+ //   - TIMEOUT: تجاوزت الصفقة MAX_TRADE_MINUTES دقيقة
+ // بعد الإغلاق: يُحدث الإحصائيات ويطبع النتيجة ويُسجّل الربح في FMZ
 function monitorTrade() {
     if (!currentTrade) return;
 
@@ -1022,10 +973,8 @@ function monitorTrade() {
 // لوحة التحكم — Dashboard
 // =====================================================================
 
-/*
- * طباعة لوحة تحكم كاملة في سجل FMZ
- * تُطبع بعد كل صفقة وكل DASHBOARD_INTERVAL ميلي ثانية
- */
+ // طباعة لوحة تحكم كاملة في سجل FMZ
+ // تُطبع بعد كل صفقة وكل DASHBOARD_INTERVAL ميلي ثانية
 function printDashboard() {
     lastDashboardPrint = Date.now();
 
@@ -1090,9 +1039,7 @@ function printDashboard() {
 // لافتة الإطلاق — Startup Banner
 // =====================================================================
 
-/*
- * طباعة لافتة البداية مع معلومات التهيئة
- */
+ // طباعة لافتة البداية مع معلومات التهيئة
 function printBanner() {
     Log("╔══════════════════════════════════════════════════════╗");
     Log("║          🔪 THE SURGEON BOT — جراح العملات          ║");
@@ -1113,10 +1060,8 @@ function printBanner() {
 // الحلقة الرئيسية — Main Loop (نقطة الدخول في FMZ)
 // =====================================================================
 
-/*
- * الدالة الرئيسية — يستدعيها FMZ تلقائياً عند تشغيل الاستراتيجية
- * تعمل في حلقة لانهائية حتى يوقفها المستخدم من لوحة FMZ
- */
+ // الدالة الرئيسية — يستدعيها FMZ تلقائياً عند تشغيل الاستراتيجية
+ // تعمل في حلقة لانهائية حتى يوقفها المستخدم من لوحة FMZ
 function main() {
     // ─── طباعة اللافتة ───
     printBanner();
