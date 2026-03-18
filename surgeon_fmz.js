@@ -44,7 +44,7 @@ var MAX_TRADE_MINUTES    = 20;         // Max trade duration in minutes
 var SCAN_INTERVAL_MS     = 30000;      // Scan interval in ms (30 seconds)
 var SYMBOL_DELAY_MS      = 200;        // Delay between symbols to avoid rate limit
 var POSITION_POLL_MS     = 10000;      // Poll position every 10 seconds
-var MIN_BALANCE          = 50;         // Minimum balance before stopping
+var MAX_DAILY_LOSS       = 50;         // Max cumulative realized loss (SL trades only) before stopping
 var SYMBOL_REFRESH_HOURS = 4;          // Refresh symbol list every 4 hours
 var DASHBOARD_INTERVAL   = 300000;     // Print dashboard every 5 minutes (ms)
 var USE_MARKET_BIAS      = true;       // Enable/disable 200 EMA daily market bias filter
@@ -78,7 +78,8 @@ var stats = {
     wins:         0,
     losses:       0,
     timeouts:     0,
-    totalPnl:     0.0
+    totalPnl:     0.0,
+    realizedLoss: 0.0   // cumulative loss from SL-closed trades this session
 };
 
 var lastDashboardPrint = 0;   // Timestamp of last dashboard print
@@ -707,9 +708,8 @@ function executeTrade(signal) {
 
     // In FMZ futures: Balance = available USDT balance
     var freeUsdt = account.Balance;
-    if (freeUsdt < MIN_BALANCE) {
-        Log("[WARN] Balance $" + freeUsdt.toFixed(2) +
-            " below minimum $" + MIN_BALANCE + "!");
+    if (freeUsdt <= 0) {
+        Log("[WARN] No free balance available — skipping trade.");
         return false;
     }
 
@@ -997,7 +997,8 @@ function monitorTrade() {
     if (closeReason === "TP") {
         stats.wins += 1;
     } else if (closeReason === "SL") {
-        stats.losses += 1;
+        stats.losses      += 1;
+        stats.realizedLoss += Math.abs(pnlUsdt); // accumulate SL loss
     } else {
         stats.timeouts += 1;
     }
@@ -1084,6 +1085,7 @@ function printDashboard() {
     Log("|  Wins               :", wins, " (" + winPct.toFixed(1) + "%)");
     Log("|  Losses             :", losses, " (" + lossPct.toFixed(1) + "%)");
     Log("|  Timeouts           :", timeouts);
+    Log("|  Realized Loss      : $" + stats.realizedLoss.toFixed(2) + " / $" + MAX_DAILY_LOSS + " limit");
     Log("+----------------------------------------------+");
     Log("|  Status             :", status);
     Log("|  Market Bias        :", getMarketBias());
@@ -1178,19 +1180,19 @@ function main() {
         // Refresh symbol list every 4 hours
         maybeRefreshSymbols();
 
-        // Check critical balance
+        // Update balance from exchange
         var accCheck = retryCall(function () { return exchange.GetAccount(); });
         if (accCheck) {
-            var freeBalance = accCheck.Balance || 0;
-            stats.balance   = freeBalance + (accCheck.FrozenBalance || 0);
+            stats.balance = (accCheck.Balance || 0) + (accCheck.FrozenBalance || 0);
+        }
 
-            if (freeBalance < MIN_BALANCE) {
-                Log("\n[CRITICAL] Available balance $" + freeBalance.toFixed(2) +
-                    " below minimum $" + MIN_BALANCE + "!");
-                Log("[STOP] Trading stopped due to low balance.");
-                printDashboard();
-                break; // Stop loop — FMZ will halt the strategy
-            }
+        // Check cumulative realized loss limit
+        if (stats.realizedLoss >= MAX_DAILY_LOSS) {
+            Log("\n[CRITICAL] Realized loss $" + stats.realizedLoss.toFixed(2) +
+                " reached limit $" + MAX_DAILY_LOSS +
+                " from initial capital $" + INITIAL_CAPITAL + " — stopping for review.");
+            printDashboard();
+            break; // Stop loop — FMZ will halt the strategy
         }
 
         // If no open trade, look for a signal
