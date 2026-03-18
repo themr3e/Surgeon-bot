@@ -1,219 +1,376 @@
 /*
 +==============================================================+
-|          THE SURGEON BOT — BACKTEST EDITION                 |
-|          FMZ Quant | Binance Futures USDT-M Perpetual       |
+|   THE SURGEON BOT v2 — FMZ QUANT                           |
+|   Strategy: Dual-TF EMA Crossover + ADX + ATR-Based SL/TP  |
+|   Binance USDT-M Futures | Backtest + Live                  |
 +==============================================================+
 
-HOW TO RUN BACKTEST ON FMZ:
-  1. Go to fmz.com → Strategy → paste this code → Save
-  2. Click "Backtest" tab
-  3. Set exchange: Binance Futures (USDT-M)
-  4. Set symbol to match BACKTEST_SYMBOL below (e.g. BTC_USDT)
-  5. Set contract type: swap
-  6. Set timeframe: 15 minutes
-  7. Set start date, end date, initial balance
-  8. Click Run
+STRATEGY OVERVIEW:
+  Timeframes : M15 (entry) + H4 (trend confirmation)
+  Indicators : EMA3, EMA8 on M15 & H4
+               EMA200 on H4 (major trend filter)
+               VWAP on M15 (entry filter)
+               ADX(14) on M15 (volatility gate, min 20)
+               ATR(14) on M15 (dynamic SL/TP sizing)
 
-DIFFERENCES FROM LIVE BOT:
-  - Single symbol only (no scanning) — set BACKTEST_SYMBOL below
-  - Telegram disabled (no HttpQuery in backtest)
-  - No exchange.IO() API calls (leverage set in FMZ backtest config)
-  - isPositionOpen() checks Amount field, not symbol name
-  - Market orders use current price (not -1) for better fill simulation
-  - Cooldown map and hourly notifications removed (not useful in backtest)
+  LONG  : H4 bullish (EMA3>EMA8 & price>EMA200) + M15 EMA3 crosses EMA8 up
+           + price above VWAP + ADX > 20 + ATR spike
+  SHORT : H4 bearish (EMA3<EMA8 & price<EMA200) + M15 EMA3 crosses EMA8 down
+           + price below VWAP + ADX > 20 + ATR spike
+
+  SL  = entry ± 1.5 × ATR
+  TP  = entry ± 3.0 × ATR  (R:R = 2:1)
+  Size = (balance × 2%) / SL distance
+
+  Max Drawdown : 20% → close trade + 12-hour cooldown
+
+TWO MODES:
+  LIVE_MODE = false → Multi-symbol backtest simulation (20 symbols)
+  LIVE_MODE = true  → Live trading on LIVE_SYMBOL (BTC_USDT)
+
+HOW TO RUN BACKTEST:
+  1. Set LIVE_MODE = false below
+  2. Paste into FMZ → Strategy → Save
+  3. Click "Run" in live mode (NOT backtest tab) — needed for symbol switching
+  4. Results will be printed as a ranked table
+  NOTE: Each symbol uses ~2000 M15 candles (~20 days) from the exchange.
+
+HOW TO RUN LIVE:
+  1. Set LIVE_MODE = true, set LIVE_SYMBOL to your desired pair
+  2. Configure Binance Futures Testnet exchange in FMZ
+  3. Set leverage to match LEVERAGE in the FMZ exchange config
+  4. Click "Start Live"
 */
 
 // =====================================================================
-// Backtest Configuration
+// CONFIGURATION
 // =====================================================================
-var BACKTEST_SYMBOL      = "BTC_USDT";   // Symbol to test — must match FMZ backtest pair
-var INITIAL_CAPITAL      = 500;           // Starting balance (set same value in FMZ backtest config)
-var TIMEFRAME            = PERIOD_M15;   // 15-minute candles
-var CANDLES_LIMIT        = 201;
-var LEVERAGE             = 10;           // Must also be set in FMZ backtest config
 
-var MAX_ORDER_USDT       = 200;
-var TP_PCT_LONG          = 1.060;        // +6% take profit for long
-var TP_PCT_SHORT         = 0.940;        // -6% take profit for short
-var SL_PCT_LONG          = 0.980;        // -2% stop loss for long
-var SL_PCT_SHORT         = 1.020;        // +2% stop loss for short
-var MAX_TRADE_MINUTES    = 20;
-var POSITION_POLL_MS     = 60000;        // 1 candle = 15min; poll every 1 min sim time
-var USE_MARKET_BIAS      = true;         // Enable 200 EMA daily bias filter
+var LIVE_MODE       = false;        // false = backtest sim | true = live trading
+var LIVE_SYMBOL     = "BTC_USDT";   // symbol used in live mode
+
+var INITIAL_CAPITAL = 10000;        // starting balance in USDT
+var LEVERAGE        = 10;           // leverage (set same value in FMZ exchange config)
+var RISK_PER_TRADE  = 0.02;         // 2% of balance risked per trade
+
+var ADX_PERIOD      = 14;           // ADX period
+var ADX_MIN         = 20;           // minimum ADX to enter trade
+var ATR_PERIOD      = 14;           // ATR period
+var ATR_SL_MULT     = 1.5;          // SL = 1.5 × ATR from entry
+var ATR_TP_MULT     = 3.0;          // TP = 3.0 × ATR from entry (R:R = 2:1)
+
+var MAX_DD_PCT      = 0.20;         // 20% max drawdown before cooldown
+var COOLDOWN_HOURS  = 12;           // hours to pause after max DD hit
+var POLL_MS         = 60000;        // live mode polling interval (ms)
+
+// Top 20 Binance Futures symbols for multi-symbol backtest
+var BACKTEST_SYMBOLS = [
+    "BTC_USDT",  "ETH_USDT",  "BNB_USDT",  "SOL_USDT",  "XRP_USDT",
+    "DOGE_USDT", "ADA_USDT",  "AVAX_USDT", "LINK_USDT", "DOT_USDT",
+    "MATIC_USDT","UNI_USDT",  "ATOM_USDT", "LTC_USDT",  "ETC_USDT",
+    "FIL_USDT",  "NEAR_USDT", "APT_USDT",  "ARB_USDT",  "OP_USDT"
+];
 
 // =====================================================================
-// Global State
+// GLOBAL STATE (live mode only)
 // =====================================================================
-var currentTrade = null;
 
-var stats = {
-    balance:     INITIAL_CAPITAL,
+var currentTrade  = null;          // active trade object or null
+var peakBalance   = INITIAL_CAPITAL;
+var cooldownUntil = 0;             // Unix ms timestamp when cooldown expires
+var liveBalance   = INITIAL_CAPITAL;
+
+var liveStats = {
     totalTrades: 0,
     wins:        0,
     losses:      0,
-    timeouts:    0,
-    totalPnl:    0.0
+    totalPnl:    0
 };
 
 // =====================================================================
-// Helpers
+// UTILITY HELPERS
 // =====================================================================
 
+// Floor a number to N decimal places (avoid over-precision in order sizes)
 function floorTo(value, decimals) {
-    var factor = Math.pow(10, decimals);
-    return Math.floor(value * factor) / factor;
+    var f = Math.pow(10, decimals);
+    return Math.floor(value * f) / f;
 }
 
-function getDecimals(stepSize) {
-    if (stepSize >= 1) return 0;
-    var s = stepSize.toString();
-    var dotIndex = s.indexOf(".");
-    if (dotIndex === -1) return 0;
-    return s.length - dotIndex - 1;
+// Pad a string to a fixed width (for table alignment)
+function padStr(str, width) {
+    var s = String(str);
+    while (s.length < width) s += " ";
+    return s.slice(0, width);
 }
 
-// Telegram: disabled in backtest — kept as stub so code stays identical to live bot
-function sendTelegram(msg) {
-    // Not used in backtest
+// Format a number with leading sign (+/-)
+function signStr(val) {
+    return val >= 0 ? "+" : "";
 }
 
 // =====================================================================
-// Technical Indicators
+// INDICATOR CALCULATIONS (all manual — no external libraries)
 // =====================================================================
 
+// ── VWAP ──
+// Cumulative (ΣTypicalPrice×Volume) / ΣVolume, reset each UTC day
 function calcVWAP(records) {
-    var vwapArr = [];
-    var cumTPV  = 0;
-    var cumVol  = 0;
-    var dayStart = -1;
+    var result = [];
+    var cumTPV = 0, cumVol = 0, dayStart = -1;
 
     for (var i = 0; i < records.length; i++) {
-        var r  = records[i];
-        var tp = (r.High + r.Low + r.Close) / 3;
-        var day = Math.floor(r.Time / 86400000);
+        var r   = records[i];
+        var tp  = (r.High + r.Low + r.Close) / 3;
+        var day = Math.floor(r.Time / 86400000); // UTC day number
 
+        // Reset at day boundary
         if (day !== dayStart) {
-            cumTPV   = 0;
-            cumVol   = 0;
+            cumTPV = 0;
+            cumVol = 0;
             dayStart = day;
         }
 
         cumTPV += tp * r.Volume;
         cumVol += r.Volume;
-        vwapArr.push(cumVol > 0 ? cumTPV / cumVol : tp);
+        result.push(cumVol > 0 ? cumTPV / cumVol : tp);
     }
-    return vwapArr;
+    return result;
 }
 
-function calcVolSMA(records, period) {
+// ── ATR (Average True Range) ──
+// Uses Wilder smoothing: ATR[i] = (ATR[i-1] × (period-1) + TR[i]) / period
+function calcATR(records, period) {
+    var n      = records.length;
     var result = [];
-    for (var i = 0; i < records.length; i++) {
+    var trArr  = [];
+
+    for (var i = 0; i < n; i++) {
+        result.push(NaN);
+        if (i === 0) {
+            trArr.push(records[i].High - records[i].Low);
+        } else {
+            var hl = records[i].High - records[i].Low;
+            var hc = Math.abs(records[i].High - records[i-1].Close);
+            var lc = Math.abs(records[i].Low  - records[i-1].Close);
+            trArr.push(Math.max(hl, hc, lc));
+        }
+    }
+
+    if (n < period) return result;
+
+    // First ATR = simple average of first `period` TR values
+    var sum = 0;
+    for (var j = 0; j < period; j++) sum += trArr[j];
+    result[period - 1] = sum / period;
+
+    // Wilder smoothing for the rest
+    for (var k = period; k < n; k++) {
+        result[k] = (result[k-1] * (period - 1) + trArr[k]) / period;
+    }
+    return result;
+}
+
+// ── ADX (Average Directional Index) ──
+// Classic Wilder method: +DM, -DM, TR smoothed → +DI, -DI → DX → ADX
+function calcADX(records, period) {
+    var n = records.length;
+    var adxArr    = [], plusDIArr = [], minusDIArr = [];
+    for (var i = 0; i < n; i++) {
+        adxArr.push(NaN); plusDIArr.push(NaN); minusDIArr.push(NaN);
+    }
+
+    if (n < period * 2 + 1) {
+        return { adx: adxArr, plusDI: plusDIArr, minusDI: minusDIArr };
+    }
+
+    // Step 1: compute raw TR, +DM, -DM for each candle
+    var trRaw  = [0];  // index 0 = placeholder
+    var pDMRaw = [0];
+    var mDMRaw = [0];
+
+    for (var i = 1; i < n; i++) {
+        var h  = records[i].High,   l  = records[i].Low;
+        var ph = records[i-1].High, pl = records[i-1].Low, pc = records[i-1].Close;
+
+        var hl = h - l;
+        var hc = Math.abs(h - pc);
+        var lc = Math.abs(l - pc);
+        trRaw.push(Math.max(hl, hc, lc));
+
+        var up = h - ph;
+        var dn = pl - l;
+        pDMRaw.push((up > dn && up > 0) ? up : 0);
+        mDMRaw.push((dn > up && dn > 0) ? dn : 0);
+    }
+
+    // Step 2: initial Wilder sum (indices 1..period)
+    var smTR = 0, smPDM = 0, smMDM = 0;
+    for (var j = 1; j <= period; j++) {
+        smTR  += trRaw[j];
+        smPDM += pDMRaw[j];
+        smMDM += mDMRaw[j];
+    }
+
+    // Step 3: compute DI and DX at each index from `period` onwards
+    var dxArr = [];
+    for (var i = 0; i < n; i++) dxArr.push(NaN);
+
+    function toDX(st, sp, sm) {
+        var pdi = st > 0 ? 100 * sp / st : 0;
+        var mdi = st > 0 ? 100 * sm / st : 0;
+        var dx  = (pdi + mdi) > 0 ? 100 * Math.abs(pdi - mdi) / (pdi + mdi) : 0;
+        return { pdi: pdi, mdi: mdi, dx: dx };
+    }
+
+    var v = toDX(smTR, smPDM, smMDM);
+    plusDIArr[period]  = v.pdi;
+    minusDIArr[period] = v.mdi;
+    dxArr[period]      = v.dx;
+
+    for (var k = period + 1; k < n; k++) {
+        smTR  = smTR  - smTR  / period + trRaw[k];
+        smPDM = smPDM - smPDM / period + pDMRaw[k];
+        smMDM = smMDM - smMDM / period + mDMRaw[k];
+        v = toDX(smTR, smPDM, smMDM);
+        plusDIArr[k]  = v.pdi;
+        minusDIArr[k] = v.mdi;
+        dxArr[k]      = v.dx;
+    }
+
+    // Step 4: ADX = Wilder average of DX, starting at index 2×period-1
+    // First ADX = simple average of DX[period .. 2*period-1]
+    var dxSum = 0;
+    for (var j = period; j < period * 2; j++) {
+        dxSum += isNaN(dxArr[j]) ? 0 : dxArr[j];
+    }
+    var adxVal = dxSum / period;
+    adxArr[period * 2 - 1] = adxVal;
+
+    for (var k = period * 2; k < n; k++) {
+        adxVal = (adxVal * (period - 1) + (isNaN(dxArr[k]) ? 0 : dxArr[k])) / period;
+        adxArr[k] = adxVal;
+    }
+
+    return { adx: adxArr, plusDI: plusDIArr, minusDI: minusDIArr };
+}
+
+// ── SMA of any array ──
+// Used to compute average ATR over last N candles for "ATR spike" detection
+function calcSMA(arr, period) {
+    var result = [];
+    for (var i = 0; i < arr.length; i++) {
         if (i < period - 1) { result.push(NaN); continue; }
-        var sum = 0;
-        for (var j = i - period + 1; j <= i; j++) sum += records[j].Volume;
-        result.push(sum / period);
+        var sum = 0, count = 0;
+        for (var j = i - period + 1; j <= i; j++) {
+            if (!isNaN(arr[j])) { sum += arr[j]; count++; }
+        }
+        result.push(count > 0 ? sum / count : NaN);
     }
     return result;
 }
 
 // =====================================================================
-// Market Bias Filter (Daily EMA200)
+// SIGNAL LOGIC
 // =====================================================================
 
-function getMarketBias() {
-    try {
-        var dailyRecords = exchange.GetRecords(PERIOD_D1);
-        if (!dailyRecords || dailyRecords.length < 201) return "NEUTRAL";
+// ── H4 Bias ──
+// Returns "BULL" / "BEAR" / "NEUTRAL" based on EMA3/EMA8/EMA200 on H4
+// Uses the last CLOSED H4 candle (index n-2 since n-1 is still forming)
+function getH4Bias(recordsH4) {
+    if (!recordsH4 || recordsH4.length < 203) return "NEUTRAL";
 
-        var ema200Arr  = TA.EMA(dailyRecords, 200);
-        var idx        = dailyRecords.length - 2; // last closed daily candle
-        var closePrice = dailyRecords[idx].Close;
-        var ema200     = ema200Arr[idx];
-
-        if (isNaN(ema200) || ema200 === 0) return "NEUTRAL";
-        if (closePrice > ema200) return "BULL";
-        if (closePrice < ema200) return "BEAR";
-        return "NEUTRAL";
-    } catch (e) {
-        return "NEUTRAL";
-    }
-}
-
-// =====================================================================
-// Five-Condition Signal Check
-// =====================================================================
-
-function checkSignal(records) {
-    if (!records || records.length < 30) return null;
-
-    var recs = records.slice(0, records.length - 1); // exclude unclosed candle
+    // Exclude the currently-forming (unclosed) candle
+    var recs = recordsH4.slice(0, recordsH4.length - 1);
     var n    = recs.length;
-    if (n < 30) return null;
 
-    var ema9Arr    = TA.EMA(recs, 9);
-    var ema21Arr   = TA.EMA(recs, 21);
-    var rsiArr     = TA.RSI(recs, 14);
-    var macdResult = TA.MACD(recs, 12, 26, 9);
-    var difArr     = macdResult[0];
-    var deaArr     = macdResult[1];
-    var vwapArr    = calcVWAP(recs);
-    var volSMAArr  = calcVolSMA(recs, 20);
+    var ema3Arr   = TA.EMA(recs, 3);
+    var ema8Arr   = TA.EMA(recs, 8);
+    var ema200Arr = TA.EMA(recs, 200);
 
-    var cur = recs[n - 1];
+    var ema3   = ema3Arr[n-1];
+    var ema8   = ema8Arr[n-1];
+    var ema200 = ema200Arr[n-1];
+    var close  = recs[n-1].Close;
 
-    var ema9Cur  = ema9Arr[n - 1];
-    var ema21Cur = ema21Arr[n - 1];
-    var rsiCur   = rsiArr[n - 1];
-    var vwapCur  = vwapArr[n - 1];
-    var volSMA   = volSMAArr[n - 1];
-    var difCur   = difArr[n - 1];
-    var deaCur   = deaArr[n - 1];
+    if (isNaN(ema3) || isNaN(ema8) || isNaN(ema200)) return "NEUTRAL";
 
-    if (isNaN(ema9Cur) || isNaN(ema21Cur)) return null;
-    if (isNaN(rsiCur)) return null;
-    if (isNaN(vwapCur) || vwapCur === 0) return null;
-    if (isNaN(volSMA)  || volSMA  === 0) return null;
-    if (isNaN(difCur)  || isNaN(deaCur)) return null;
+    if (ema3 > ema8 && close > ema200) return "BULL";
+    if (ema3 < ema8 && close < ema200) return "BEAR";
+    return "NEUTRAL";
+}
 
-    // Condition 1 — EMA trend
-    var emaCrossLong  = ema9Cur > ema21Cur;
-    var emaCrossShort = ema9Cur < ema21Cur;
+// ── M15 Signal ──
+// Checks 5 conditions on M15 candles:
+//   1. EMA3/EMA8 fresh crossover (strict: cross happened on last closed candle)
+//   2. Price above/below VWAP
+//   3. ADX > ADX_MIN
+//   4. Current ATR > SMA(ATR, 20) — confirms volatility spike
+//   5. H4 bias must match direction (passed as parameter)
+//
+// Returns { signal: "LONG"|"SHORT"|null, atr, adx, vwap }
+function checkM15Signal(recordsM15, h4Bias) {
+    var empty = { signal: null, atr: 0, adx: 0, vwap: 0 };
+    if (!recordsM15 || recordsM15.length < 60) return empty;
 
-    // Condition 2 — RSI
-    var rsiLong  = (rsiCur >= 40) && (rsiCur <= 65);
-    var rsiShort = (rsiCur >= 35) && (rsiCur <= 60);
+    // Work on closed candles only (exclude last forming candle)
+    var recs = recordsM15.slice(0, recordsM15.length - 1);
+    var n    = recs.length;
+    if (n < 60) return empty;
 
-    // Condition 3 — VWAP
-    var closeCur  = cur.Close;
-    var vwapLong  = closeCur > vwapCur;
-    var vwapShort = closeCur < vwapCur;
+    // Compute indicators
+    var ema3Arr  = TA.EMA(recs, 3);
+    var ema8Arr  = TA.EMA(recs, 8);
+    var vwapArr  = calcVWAP(recs);
+    var atrArr   = calcATR(recs, ATR_PERIOD);
+    var adxRes   = calcADX(recs, ADX_PERIOD);
+    var atrSMAArr = calcSMA(atrArr, 20);
 
-    // Condition 4 — Volume spike (2x average)
-    var volSpike = cur.Volume > (2.0 * volSMA);
+    // Current (n-1) and previous (n-2) closed candle indices
+    var cur = n - 1, prv = n - 2;
 
-    // Condition 5 — MACD position
-    var macdLong  = difCur > deaCur;
-    var macdShort = difCur < deaCur;
+    var e3c = ema3Arr[cur], e3p = ema3Arr[prv];
+    var e8c = ema8Arr[cur], e8p = ema8Arr[prv];
+    var vwap   = vwapArr[cur];
+    var atr    = atrArr[cur];
+    var atrSMA = atrSMAArr[cur];
+    var adx    = adxRes.adx[cur];
 
+    // Validate — skip if any indicator is unavailable
+    if (isNaN(e3c) || isNaN(e3p) || isNaN(e8c) || isNaN(e8p)) return empty;
+    if (isNaN(vwap) || isNaN(atr) || isNaN(atrSMA) || isNaN(adx)) return empty;
+
+    var close = recs[cur].Close;
+
+    // ── Condition 1: Fresh EMA crossover ──
+    // Crossover UP:   previous candle EMA3 was ≤ EMA8, current EMA3 > EMA8
+    // Crossover DOWN: previous candle EMA3 was ≥ EMA8, current EMA3 < EMA8
+    var crossUp   = (e3p <= e8p) && (e3c > e8c);
+    var crossDown = (e3p >= e8p) && (e3c < e8c);
+
+    // ── Condition 2: Price vs VWAP ──
+    var aboveVWAP = close > vwap;
+    var belowVWAP = close < vwap;
+
+    // ── Condition 3: ADX gate ──
+    var adxOk = adx > ADX_MIN;
+
+    // ── Condition 4: ATR spike ──
+    var atrSpike = atr > atrSMA;
+
+    // ── Combined signal (all 5 conditions including H4 bias) ──
     var signal = null;
-    if (emaCrossLong  && rsiLong  && vwapLong  && volSpike && macdLong)  signal = "LONG";
-    if (emaCrossShort && rsiShort && vwapShort && volSpike && macdShort) signal = "SHORT";
+    if (h4Bias === "BULL" && crossUp   && aboveVWAP && adxOk && atrSpike) signal = "LONG";
+    if (h4Bias === "BEAR" && crossDown && belowVWAP && adxOk && atrSpike) signal = "SHORT";
 
-    // Market bias filter
-    if (!USE_MARKET_BIAS || signal === null) return signal;
-
-    var bias = getMarketBias();
-    if (bias === "NEUTRAL") return signal;
-    if (bias === "BULL" && signal === "LONG")  return "LONG";
-    if (bias === "BEAR" && signal === "SHORT") return "SHORT";
-    return null;
+    return { signal: signal, atr: atr, adx: adx, vwap: vwap };
 }
 
 // =====================================================================
-// Position Helpers
+// POSITION HELPERS (live mode)
 // =====================================================================
 
-// In backtest: check Amount field — ContractType is "swap" not symbol name
+// Check if any position is currently open
 function isPositionOpen() {
     try {
         var positions = exchange.GetPosition();
@@ -223,88 +380,116 @@ function isPositionOpen() {
         }
         return false;
     } catch (e) {
-        return true; // assume open if error
+        return true; // assume still open on error
     }
 }
 
+// Get latest market price
 function getCurrentPrice() {
     var ticker = exchange.GetTicker();
     return ticker ? ticker.Last : 0;
 }
 
+// Close position with market-like limit order (small slippage to ensure fill)
 function closePositionMarket(dir, size) {
     try {
         var price = getCurrentPrice();
         if (dir === "LONG") {
             exchange.SetDirection("closebuy");
-            exchange.Sell(price * 0.999, size); // small slippage
+            exchange.Sell(price * 0.999, size);  // limit slightly below market = quick fill
         } else {
             exchange.SetDirection("closesell");
             exchange.Buy(price * 1.001, size);
         }
-        Log("[CLOSE] Market close sent for", dir, "| size:", size);
+        Log("[CLOSE] Position closed:", dir, "| size:", size);
     } catch (e) {
         Log("[ERROR] Close failed:", e.message || e);
     }
 }
 
 // =====================================================================
-// Trade Execution
+// RISK MANAGEMENT
 // =====================================================================
 
-function executeTrade(signal) {
-    var dir = signal.direction;
+// Check max drawdown. If exceeded: close position + start 12h cooldown.
+// Returns true if bot should skip trading this cycle.
+function checkDrawdown(balance) {
+    // Update peak balance
+    if (balance > peakBalance) peakBalance = balance;
 
-    Log("\n[TRADE] Opening", dir, "on", BACKTEST_SYMBOL);
+    var dd = peakBalance > 0 ? (peakBalance - balance) / peakBalance : 0;
 
-    // Fetch balance
-    var account = exchange.GetAccount();
-    if (!account) { Log("[ERROR] No account data."); return false; }
+    if (dd >= MAX_DD_PCT) {
+        // Only trigger once per drawdown event (not if already in cooldown)
+        if (cooldownUntil <= Date.now()) {
+            Log("⛔ ====================================================");
+            Log("⛔ [CRITICAL] Max drawdown " + (dd * 100).toFixed(1) + "% reached!");
+            Log("⛔ Peak balance: $" + peakBalance.toFixed(2) + " | Current: $" + balance.toFixed(2));
+            Log("⛔ Closing any open position and halting for " + COOLDOWN_HOURS + "h...");
+            Log("⛔ ====================================================");
 
-    var freeUsdt = account.Balance;
-    if (freeUsdt <= 0) { Log("[WARN] No free balance."); return false; }
+            // Close open position if exists
+            if (currentTrade) {
+                closePositionMarket(currentTrade.direction, currentTrade.size);
+                currentTrade = null;
+            }
 
-    // Current price
+            // Set cooldown expiry
+            cooldownUntil = Date.now() + COOLDOWN_HOURS * 3600000;
+            Log("⛔ Cooldown until: " + new Date(cooldownUntil).toUTCString());
+        }
+        return true; // should pause trading
+    }
+    return false;
+}
+
+// =====================================================================
+// TRADE EXECUTION (live mode)
+// =====================================================================
+
+// Open a new trade using a limit order at current market price (Maker fee)
+// dir = "LONG" or "SHORT"
+// atr = current ATR value (used for SL/TP distance and position sizing)
+function executeLiveTrade(dir, atr) {
     var ticker = exchange.GetTicker();
-    if (!ticker) { Log("[ERROR] No ticker."); return false; }
+    if (!ticker) { Log("[ERROR] No ticker data."); return false; }
     var entryPrice = ticker.Last;
 
-    // Position size: risk 2% of balance per trade
-    var slPct     = (dir === "LONG") ? (1 - SL_PCT_LONG) : (SL_PCT_SHORT - 1);
-    var maxLoss   = stats.balance * 0.02;
-    var tradeUsdt = maxLoss / (slPct * LEVERAGE);
-    tradeUsdt = Math.min(tradeUsdt, MAX_ORDER_USDT);
+    var account = exchange.GetAccount();
+    if (!account) { Log("[ERROR] Cannot fetch account balance."); return false; }
+    liveBalance = (account.Balance || 0) + (account.FrozenBalance || 0);
+    if (liveBalance <= 0) { Log("[WARN] Zero balance — skipping trade."); return false; }
 
-    var size = floorTo((tradeUsdt * LEVERAGE) / entryPrice, 3);
-    if (size <= 0) { Log("[ERROR] Size zero."); return false; }
+    // Position sizing: risk exactly RISK_PER_TRADE of balance
+    var slDist   = ATR_SL_MULT * atr;
+    var tpDist   = ATR_TP_MULT * atr;
+    var riskUsdt = liveBalance * RISK_PER_TRADE;
+    var size     = floorTo(riskUsdt / slDist, 3);
 
-    Log("[SIZE] $" + tradeUsdt.toFixed(2) + " margin | size: " + size + " @ $" + entryPrice.toFixed(4));
+    if (size <= 0) { Log("[ERROR] Calculated size is zero. ATR:", atr); return false; }
 
-    // Place market order
+    var tpPrice = dir === "LONG" ? entryPrice + tpDist : entryPrice - tpDist;
+    var slPrice = dir === "LONG" ? entryPrice - slDist : entryPrice + slDist;
+
+    Log("\n[TRADE] Opening", dir, "on", LIVE_SYMBOL);
+    Log("[TRADE] Entry: $" + entryPrice.toFixed(2) +
+        " | TP: $" + tpPrice.toFixed(2) + " (+" + (ATR_TP_MULT * 100 * atr / entryPrice).toFixed(2) + "%)" +
+        " | SL: $" + slPrice.toFixed(2) + " (-" + (ATR_SL_MULT * 100 * atr / entryPrice).toFixed(2) + "%)" +
+        " | Size: " + size + " | Risk: $" + riskUsdt.toFixed(2));
+
+    // Place limit order (acts as Maker order)
     try {
         if (dir === "LONG") {
             exchange.SetDirection("buy");
-            exchange.Buy(entryPrice * 1.001, size);
+            exchange.Buy(entryPrice, size);
         } else {
             exchange.SetDirection("sell");
-            exchange.Sell(entryPrice * 0.999, size);
+            exchange.Sell(entryPrice, size);
         }
     } catch (e) {
         Log("[ERROR] Order failed:", e.message || e);
         return false;
     }
-
-    // TP / SL prices
-    var tpPrice, slPrice;
-    if (dir === "LONG") {
-        tpPrice = entryPrice * TP_PCT_LONG;
-        slPrice = entryPrice * SL_PCT_LONG;
-    } else {
-        tpPrice = entryPrice * TP_PCT_SHORT;
-        slPrice = entryPrice * SL_PCT_SHORT;
-    }
-
-    Log("[TARGETS] TP: $" + tpPrice.toFixed(4) + " | SL: $" + slPrice.toFixed(4));
 
     currentTrade = {
         direction:  dir,
@@ -312,213 +497,566 @@ function executeTrade(signal) {
         entryPrice: entryPrice,
         tpPrice:    tpPrice,
         slPrice:    slPrice,
-        entryTime:  Date.now(),
-        open:       true
+        entryTime:  Date.now()
     };
-
     return true;
 }
 
 // =====================================================================
-// Trade Monitoring
+// TRADE MONITORING (live mode)
 // =====================================================================
 
-function monitorTrade() {
+// Poll price until TP or SL is hit, then close and update stats
+function monitorLiveTrade() {
     if (!currentTrade) return;
 
-    var dir        = currentTrade.direction;
-    var entryPrice = currentTrade.entryPrice;
-    var tpPrice    = currentTrade.tpPrice;
-    var slPrice    = currentTrade.slPrice;
-    var entryTime  = currentTrade.entryTime;
-    var size       = currentTrade.size;
-    var maxMs      = MAX_TRADE_MINUTES * 60 * 1000;
+    var dir   = currentTrade.direction;
+    var tp    = currentTrade.tpPrice;
+    var sl    = currentTrade.slPrice;
+    var entry = currentTrade.entryPrice;
+    var size  = currentTrade.size;
 
-    var closeReason = "TIMEOUT";
-    var closePrice  = entryPrice;
+    Log("[MONITOR]", dir, "| Entry: $" + entry.toFixed(2) +
+        " | TP: $" + tp.toFixed(2) + " | SL: $" + sl.toFixed(2));
 
-    Log("[MONITOR]", dir, "| Entry: $" + entryPrice.toFixed(4) +
-        " | TP: $" + tpPrice.toFixed(4) + " | SL: $" + slPrice.toFixed(4));
+    var closeReason = "UNKNOWN";
+    var closePrice  = entry;
 
     while (true) {
-        var elapsed = Date.now() - entryTime;
-
-        // Timeout check
-        if (elapsed >= maxMs) {
-            Log("[TIMEOUT] " + MAX_TRADE_MINUTES + " min reached — closing.");
-            closePositionMarket(dir, size);
-            closePrice  = getCurrentPrice();
-            closeReason = "TIMEOUT";
-            break;
-        }
-
-        var curPrice = getCurrentPrice();
-        if (curPrice <= 0) { Sleep(POSITION_POLL_MS); continue; }
+        var price = getCurrentPrice();
+        if (price <= 0) { Sleep(POLL_MS); continue; }
 
         if (dir === "LONG") {
-            if (curPrice >= tpPrice) {
-                Log("[TP] Price " + curPrice.toFixed(4) + " >= TP " + tpPrice.toFixed(4));
+            if (price >= tp) {
+                Log("[TP] Long TP hit at $" + price.toFixed(2));
                 closePositionMarket(dir, size);
-                closePrice  = tpPrice;
-                closeReason = "TP";
+                closePrice = tp; closeReason = "TP";
                 break;
             }
-            if (curPrice <= slPrice) {
-                Log("[SL] Price " + curPrice.toFixed(4) + " <= SL " + slPrice.toFixed(4));
+            if (price <= sl) {
+                Log("[SL] Long SL hit at $" + price.toFixed(2));
                 closePositionMarket(dir, size);
-                closePrice  = slPrice;
-                closeReason = "SL";
+                closePrice = sl; closeReason = "SL";
                 break;
             }
-        }
-
-        if (dir === "SHORT") {
-            if (curPrice <= tpPrice) {
-                Log("[TP] Price " + curPrice.toFixed(4) + " <= TP " + tpPrice.toFixed(4));
+        } else {
+            if (price <= tp) {
+                Log("[TP] Short TP hit at $" + price.toFixed(2));
                 closePositionMarket(dir, size);
-                closePrice  = tpPrice;
-                closeReason = "TP";
+                closePrice = tp; closeReason = "TP";
                 break;
             }
-            if (curPrice >= slPrice) {
-                Log("[SL] Price " + curPrice.toFixed(4) + " >= SL " + slPrice.toFixed(4));
+            if (price >= sl) {
+                Log("[SL] Short SL hit at $" + price.toFixed(2));
                 closePositionMarket(dir, size);
-                closePrice  = slPrice;
-                closeReason = "SL";
+                closePrice = sl; closeReason = "SL";
                 break;
             }
         }
 
-        var remaining = maxMs - elapsed;
-        Log("[MONITOR] Price: $" + curPrice.toFixed(4) +
-            " | Remaining: " + Math.floor(remaining / 60000) + "m " +
-            Math.floor((remaining % 60000) / 1000) + "s");
+        // Show live PnL while waiting
+        var pnl = dir === "LONG" ? (price - entry) * size : (entry - price) * size;
+        Log("[MONITOR] $" + price.toFixed(2) +
+            " | PnL: " + signStr(pnl) + "$" + pnl.toFixed(2));
 
-        Sleep(POSITION_POLL_MS);
+        Sleep(POLL_MS);
     }
 
-    // ─── PnL ───
-    var pnlPct;
-    if (dir === "LONG") {
-        pnlPct = (closePrice - entryPrice) / entryPrice;
-    } else {
-        pnlPct = (entryPrice - closePrice) / entryPrice;
-    }
-    var pnlUsdt = pnlPct * size * entryPrice;
+    // Calculate and log PnL
+    var pnlUsdt = dir === "LONG"
+        ? (closePrice - entry) * size
+        : (entry - closePrice) * size;
+    var pnlPct = pnlUsdt / (entry * size) * 100;
 
-    // Update stats
-    stats.totalTrades += 1;
-    stats.totalPnl    += pnlUsdt;
-    if (closeReason === "TP")      stats.wins     += 1;
-    else if (closeReason === "SL") stats.losses   += 1;
-    else                           stats.timeouts += 1;
+    liveStats.totalTrades++;
+    liveStats.totalPnl += pnlUsdt;
+    if (closeReason === "TP") liveStats.wins++;
+    else                      liveStats.losses++;
 
-    // Update balance from exchange (most accurate in backtest)
-    var accUpd = exchange.GetAccount();
-    if (accUpd) {
-        stats.balance = (accUpd.Balance || 0) + (accUpd.FrozenBalance || 0);
-    } else {
-        stats.balance += pnlUsdt;
-    }
+    // Fetch updated balance
+    var acc = exchange.GetAccount();
+    if (acc) liveBalance = (acc.Balance || 0) + (acc.FrozenBalance || 0);
+    else     liveBalance += pnlUsdt;
 
-    var sign = pnlUsdt >= 0 ? "+" : "";
     Log("======================================");
     Log("[RESULT] Reason  :", closeReason);
-    Log("[RESULT] PnL     :", sign + pnlUsdt.toFixed(4) + " USDT (" + sign + (pnlPct * 100).toFixed(2) + "%)");
-    Log("[RESULT] Balance : $" + stats.balance.toFixed(2));
+    Log("[RESULT] PnL     :", signStr(pnlUsdt) + "$" + pnlUsdt.toFixed(2),
+        "(" + signStr(pnlPct) + pnlPct.toFixed(2) + "%)");
+    Log("[RESULT] Balance : $" + liveBalance.toFixed(2));
     Log("======================================\n");
 
-    LogProfit(stats.balance);
-
+    LogProfit(liveBalance);
     currentTrade = null;
 }
 
 // =====================================================================
-// Dashboard
+// LIVE DASHBOARD
 // =====================================================================
 
-function printDashboard() {
-    var total   = stats.totalTrades;
-    var winPct  = total > 0 ? (stats.wins    / total * 100).toFixed(1) : "0.0";
-    var lossPct = total > 0 ? (stats.losses  / total * 100).toFixed(1) : "0.0";
-    var pnlSign = stats.totalPnl >= 0 ? "+" : "";
-    var growthPct = ((stats.balance - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100).toFixed(2);
+// Print a detailed status block to the FMZ log every polling cycle
+function printDashboard(h4Bias, m15Signal, adxVal, atrVal, vwapVal, price) {
+    var now = new Date();
+    var utc = now.getUTCFullYear() + "-"
+        + ("0" + (now.getUTCMonth()+1)).slice(-2) + "-"
+        + ("0" + now.getUTCDate()).slice(-2) + " "
+        + ("0" + now.getUTCHours()).slice(-2) + ":"
+        + ("0" + now.getUTCMinutes()).slice(-2) + " UTC";
 
-    Log("+----------------------------------------------+");
-    Log("|    THE SURGEON BOT — BACKTEST RESULTS        |");
-    Log("+----------------------------------------------+");
-    Log("|  Symbol          :", BACKTEST_SYMBOL);
-    Log("|  Initial Capital : $" + INITIAL_CAPITAL.toFixed(2));
-    Log("|  Final Balance   : $" + stats.balance.toFixed(2));
-    Log("|  Net Growth      :", (stats.totalPnl >= 0 ? "+" : "") + growthPct + "%");
-    Log("|  Total PnL       :", pnlSign + "$" + stats.totalPnl.toFixed(2));
-    Log("+----------------------------------------------+");
-    Log("|  Total Trades    :", total);
-    Log("|  Wins            :", stats.wins,    "(" + winPct  + "%)");
-    Log("|  Losses          :", stats.losses,  "(" + lossPct + "%)");
-    Log("|  Timeouts        :", stats.timeouts);
-    Log("+----------------------------------------------+");
+    var dd     = peakBalance > 0 ? (peakBalance - liveBalance) / peakBalance * 100 : 0;
+    var ddStr  = dd.toFixed(2) + "%";
+
+    var h4Str = h4Bias === "BULL"
+        ? "Bullish (EMA3 > EMA8, Price > EMA200)"
+        : h4Bias === "BEAR"
+        ? "Bearish (EMA3 < EMA8, Price < EMA200)"
+        : "Neutral";
+
+    var m15Str = m15Signal === "LONG"  ? "EMA Cross UP  — LONG setup"  :
+                 m15Signal === "SHORT" ? "EMA Cross DOWN — SHORT setup" :
+                 "No Signal";
+
+    var cdStr = "OFF";
+    if (cooldownUntil > Date.now()) {
+        cdStr = "ON — " + ((cooldownUntil - Date.now()) / 3600000).toFixed(1) + "h remaining";
+    }
+
+    Log("╔══════════════════════════════════════════╗");
+    Log("║    THE SURGEON BOT v2 — LIVE             ║");
+    Log("╠══════════════════════════════════════════╣");
+    Log("║  Time      : " + utc);
+    Log("║  Price     : $" + price.toFixed(2));
+    Log("║  H4 Bias   : " + h4Str);
+    Log("║  M15 Signal: " + m15Str);
+    Log("║  ADX (14)  : " + (isNaN(adxVal)  ? "---" : adxVal.toFixed(1)));
+    Log("║  ATR (14)  : $" + (isNaN(atrVal) ? "---" : atrVal.toFixed(2)));
+    Log("║  VWAP      : $" + (isNaN(vwapVal)? "---" : vwapVal.toFixed(2)));
+    Log("╠══════════════════════════════════════════╣");
+
+    if (currentTrade) {
+        var pnl = currentTrade.direction === "LONG"
+            ? (price - currentTrade.entryPrice) * currentTrade.size
+            : (currentTrade.entryPrice - price) * currentTrade.size;
+        var tpDistPct = (Math.abs(currentTrade.tpPrice - currentTrade.entryPrice) / currentTrade.entryPrice * 100).toFixed(2);
+        var slDistPct = (Math.abs(currentTrade.slPrice - currentTrade.entryPrice) / currentTrade.entryPrice * 100).toFixed(2);
+        Log("║  ── Open Trade ──────────────────────────");
+        Log("║  Type    : " + currentTrade.direction);
+        Log("║  Entry   : $" + currentTrade.entryPrice.toFixed(2));
+        Log("║  TP      : $" + currentTrade.tpPrice.toFixed(2) + "  (+" + tpDistPct + "%)");
+        Log("║  SL      : $" + currentTrade.slPrice.toFixed(2)  + "  (-" + slDistPct + "%)");
+        Log("║  PnL     : " + signStr(pnl) + "$" + pnl.toFixed(2));
+    } else {
+        Log("║  Trade   : No open position");
+    }
+
+    Log("╠══════════════════════════════════════════╣");
+    Log("║  Balance   : $" + liveBalance.toFixed(2));
+    Log("║  Peak Bal  : $" + peakBalance.toFixed(2));
+    Log("║  Drawdown  : " + ddStr);
+    Log("║  Cooldown  : " + cdStr);
+    Log("║  Trades    : " + liveStats.totalTrades +
+        " (W:" + liveStats.wins + " / L:" + liveStats.losses + ")");
+    Log("╚══════════════════════════════════════════╝");
+
+    if (cooldownUntil > Date.now()) {
+        Log("⏳ BOT IN COOLDOWN — " + cdStr);
+    }
 }
 
 // =====================================================================
-// Main Entry Point
+// MULTI-SYMBOL BACKTEST SIMULATION
 // =====================================================================
 
-function main() {
-    Log("+------------------------------------------------------+");
-    Log("|       THE SURGEON BOT — BACKTEST EDITION            |");
-    Log("+------------------------------------------------------+");
-    Log("|  Symbol     :", BACKTEST_SYMBOL);
-    Log("|  Timeframe  : 15 minutes");
-    Log("|  Leverage   :", LEVERAGE + "x  (set in FMZ backtest config)");
-    Log("|  TP / SL    : +6% / -2%");
-    Log("|  Max Time   :", MAX_TRADE_MINUTES, "minutes per trade");
-    Log("|  Bias Filter:", USE_MARKET_BIAS ? "ON (Daily EMA200)" : "OFF");
-    Log("+------------------------------------------------------+");
+// Simulate the strategy on a single symbol using pre-fetched candle arrays.
+// Walk-forward: computes all indicators once, then iterates candle by candle.
+//
+// TP/SL check on each candle: uses candle High/Low to determine if hit.
+// If both SL and TP are hit within the same candle → SL assumed (conservative).
+//
+// Returns a result object with performance metrics.
+function simulateSymbol(symbol, recordsM15, recordsH4) {
+    var n15 = recordsM15.length;
+    var n4  = recordsH4.length;
+    var ERR = { symbol: symbol, netPnl: 0, trades: 0, wins: 0, losses: 0,
+                winPct: 0, profitFactor: 0, maxDD: 0, balance: INITIAL_CAPITAL };
 
-    // Set symbol
-    exchange.IO("currency", BACKTEST_SYMBOL);
-    exchange.SetContractType("swap");
-
-    // Read actual starting balance from FMZ backtest engine
-    var account = exchange.GetAccount();
-    if (account) {
-        stats.balance = (account.Balance || 0) + (account.FrozenBalance || 0);
-        if (stats.balance <= 0) stats.balance = INITIAL_CAPITAL;
+    if (n15 < 310 || n4 < 210) {
+        ERR.error = "Not enough data (M15:" + n15 + " H4:" + n4 + ")";
+        return ERR;
     }
-    Log("[BALANCE] Starting balance: $" + stats.balance.toFixed(2));
 
-    // ─── Main loop ───
-    while (true) {
-        // Fetch candles
-        var records = exchange.GetRecords(TIMEFRAME);
-        if (!records || records.length < 50) {
-            Log("[WARN] Not enough candles:", records ? records.length : 0);
-            Sleep(POSITION_POLL_MS);
+    // ── Pre-compute ALL M15 indicators (once, O(n)) ──
+    var ema3_15    = TA.EMA(recordsM15, 3);
+    var ema8_15    = TA.EMA(recordsM15, 8);
+    var vwap_15    = calcVWAP(recordsM15);
+    var atr_15     = calcATR(recordsM15, ATR_PERIOD);
+    var adxRes_15  = calcADX(recordsM15, ADX_PERIOD);
+    var adx_15     = adxRes_15.adx;
+    var atrSMA_15  = calcSMA(atr_15, 20);
+
+    // ── Pre-compute ALL H4 indicators (once, O(n)) ──
+    var ema3_4    = TA.EMA(recordsH4, 3);
+    var ema8_4    = TA.EMA(recordsH4, 8);
+    var ema200_4  = TA.EMA(recordsH4, 200);
+
+    // ── Simulation state ──
+    var balance     = INITIAL_CAPITAL;
+    var peakBal     = INITIAL_CAPITAL;
+    var maxDD       = 0;
+    var trades      = 0, wins = 0, losses = 0;
+    var grossProfit = 0, grossLoss = 0;
+    var totalPnl    = 0;
+    var position    = null; // { dir, size, entry, tp, sl }
+
+    // H4 pointer: advances alongside M15 timestamps
+    var h4Ptr = 0;
+
+    // ── Walk forward from M15 index 300 (warmup) ──
+    for (var i = 300; i < n15 - 1; i++) {
+        var curTime = recordsM15[i].Time;
+
+        // Advance H4 pointer to the last H4 candle whose open time ≤ current M15 time
+        while (h4Ptr + 1 < n4 && recordsH4[h4Ptr + 1].Time <= curTime) {
+            h4Ptr++;
+        }
+
+        // Use h4Ptr-1 as the last FULLY CLOSED H4 candle
+        var h4Idx = h4Ptr - 1;
+        if (h4Idx < 200) continue; // need 200 bars for EMA200
+
+        // H4 indicators
+        var h4e3   = ema3_4[h4Idx];
+        var h4e8   = ema8_4[h4Idx];
+        var h4e200 = ema200_4[h4Idx];
+        if (isNaN(h4e3) || isNaN(h4e8) || isNaN(h4e200)) continue;
+
+        var h4Close = recordsH4[h4Idx].Close;
+        var h4Bias;
+        if      (h4e3 > h4e8 && h4Close > h4e200) h4Bias = "BULL";
+        else if (h4e3 < h4e8 && h4Close < h4e200) h4Bias = "BEAR";
+        else                                        h4Bias = "NEUTRAL";
+
+        // ── Check open position TP/SL ──
+        if (position !== null) {
+            var candle = recordsM15[i];
+            var closed = false, closePx = 0, win = false;
+
+            if (position.dir === "LONG") {
+                // Conservative: SL takes priority if both hit same candle
+                if (candle.Low <= position.sl) {
+                    closed = true; closePx = position.sl; win = false;
+                } else if (candle.High >= position.tp) {
+                    closed = true; closePx = position.tp; win = true;
+                }
+            } else { // SHORT
+                if (candle.High >= position.sl) {
+                    closed = true; closePx = position.sl; win = false;
+                } else if (candle.Low <= position.tp) {
+                    closed = true; closePx = position.tp; win = true;
+                }
+            }
+
+            if (closed) {
+                var pnl = position.dir === "LONG"
+                    ? (closePx - position.entry) * position.size
+                    : (position.entry - closePx) * position.size;
+
+                balance  += pnl;
+                totalPnl += pnl;
+                trades++;
+
+                if (win) { wins++; grossProfit += pnl; }
+                else     { losses++; grossLoss  += Math.abs(pnl); }
+
+                if (balance > peakBal) peakBal = balance;
+                var dd = (peakBal - balance) / peakBal;
+                if (dd > maxDD) maxDD = dd;
+
+                position = null;
+            }
+            // Never open a new trade on the same candle we close (one trade at a time)
             continue;
         }
 
-        if (!currentTrade) {
-            // Check for signal
-            var signal = checkSignal(records);
+        // ── Check M15 entry conditions ──
+        var e3c = ema3_15[i],   e3p = ema3_15[i-1];
+        var e8c = ema8_15[i],   e8p = ema8_15[i-1];
+        var vwap   = vwap_15[i];
+        var atr    = atr_15[i];
+        var atrSMA = atrSMA_15[i];
+        var adxV   = adx_15[i];
 
-            if (signal) {
-                Log("[SIGNAL]", signal, "detected on", BACKTEST_SYMBOL);
-                var success = executeTrade({ symbol: BACKTEST_SYMBOL, direction: signal });
-                if (success) {
-                    monitorTrade();
-                } else {
-                    Log("[WARN] Trade execution failed.");
-                    Sleep(POSITION_POLL_MS);
-                }
-            } else {
-                Sleep(POSITION_POLL_MS);
+        if (isNaN(e3c) || isNaN(e3p) || isNaN(e8c) || isNaN(e8p)) continue;
+        if (isNaN(vwap) || isNaN(atr) || isNaN(atrSMA) || isNaN(adxV)) continue;
+        if (atr <= 0) continue;
+
+        var close = recordsM15[i].Close;
+
+        var crossUp   = (e3p <= e8p) && (e3c > e8c);
+        var crossDown = (e3p >= e8p) && (e3c < e8c);
+        var adxOk     = adxV > ADX_MIN;
+        var atrSpike  = atr > atrSMA;
+
+        var signal = null;
+        if (h4Bias === "BULL" && crossUp   && close > vwap && adxOk && atrSpike) signal = "LONG";
+        if (h4Bias === "BEAR" && crossDown && close < vwap && adxOk && atrSpike) signal = "SHORT";
+
+        if (signal === null) continue;
+
+        // Enter at next candle's open price (realistic fill)
+        var entryPrice = recordsM15[i+1].Open;
+        var slDist     = ATR_SL_MULT * atr;
+        var tpDist     = ATR_TP_MULT * atr;
+        var riskUsd    = balance * RISK_PER_TRADE;
+        var size       = riskUsd / slDist;
+
+        if (size <= 0 || slDist <= 0) continue;
+
+        position = {
+            dir:   signal,
+            size:  size,
+            entry: entryPrice,
+            tp:    signal === "LONG" ? entryPrice + tpDist : entryPrice - tpDist,
+            sl:    signal === "LONG" ? entryPrice - slDist : entryPrice + slDist
+        };
+    }
+
+    var profitFactor = grossLoss > 0
+        ? grossProfit / grossLoss
+        : (grossProfit > 0 ? 999.0 : 0.0);
+
+    return {
+        symbol:       symbol,
+        netPnl:       totalPnl,
+        balance:      balance,
+        trades:       trades,
+        wins:         wins,
+        losses:       losses,
+        winPct:       trades > 0 ? wins / trades * 100 : 0,
+        profitFactor: profitFactor,
+        maxDD:        maxDD * 100
+    };
+}
+
+// Run backtest on all 20 symbols and print a ranked results table
+function runMultiSymbolBacktest() {
+    Log("+============================================================+");
+    Log("|   THE SURGEON BOT v2 — MULTI-SYMBOL BACKTEST              |");
+    Log("|   Strategy: EMA3/8 Cross (M15+H4) + ADX + ATR SL/TP      |");
+    Log("+============================================================+");
+    Log("|  Capital per symbol : $" + INITIAL_CAPITAL);
+    Log("|  Risk per trade     : " + (RISK_PER_TRADE * 100) + "%");
+    Log("|  SL                 : " + ATR_SL_MULT + "× ATR");
+    Log("|  TP                 : " + ATR_TP_MULT + "× ATR  (R:R 2:1)");
+    Log("|  Min ADX            : " + ADX_MIN);
+    Log("|  Symbols            : " + BACKTEST_SYMBOLS.length);
+    Log("+============================================================+\n");
+
+    var results = [];
+
+    for (var s = 0; s < BACKTEST_SYMBOLS.length; s++) {
+        var sym = BACKTEST_SYMBOLS[s];
+        Log("[" + (s+1) + "/" + BACKTEST_SYMBOLS.length + "] Fetching data for " + sym + "...");
+
+        try {
+            exchange.IO("currency", sym);
+            exchange.SetContractType("swap");
+            Sleep(600); // small delay to avoid API rate limit
+
+            var rM15 = exchange.GetRecords(PERIOD_M15);
+            var rH4  = exchange.GetRecords(PERIOD_H4);
+
+            if (!rM15 || !rH4) {
+                Log("[WARN] No data returned for " + sym);
+                results.push({ symbol: sym, netPnl: 0, trades: 0, wins: 0, losses: 0,
+                    winPct: 0, profitFactor: 0, maxDD: 0, balance: INITIAL_CAPITAL,
+                    error: "No data" });
+                continue;
             }
 
+            Log("       Simulating " + rM15.length + " M15 + " + rH4.length + " H4 candles...");
+            var res = simulateSymbol(sym, rM15, rH4);
+            results.push(res);
+
+            if (res.error) {
+                Log("       [SKIP] " + res.error);
+            } else {
+                Log("       Done — PnL: " + signStr(res.netPnl) + "$" + res.netPnl.toFixed(2) +
+                    " | Trades: " + res.trades +
+                    " | Win%: " + res.winPct.toFixed(1) + "%");
+            }
+
+        } catch (e) {
+            Log("[ERROR] " + sym + ": " + (e.message || e));
+            results.push({ symbol: sym, netPnl: 0, trades: 0, wins: 0, losses: 0,
+                winPct: 0, profitFactor: 0, maxDD: 0, balance: INITIAL_CAPITAL,
+                error: String(e.message || e).slice(0, 50) });
+        }
+
+        Sleep(400);
+    }
+
+    // Sort by net PnL descending (best → worst)
+    results.sort(function(a, b) { return b.netPnl - a.netPnl; });
+
+    // ── Print ranked results table ──
+    Log("\n");
+    Log("+====+===============+============+========+======+=========+=======+");
+    Log("| #  | Symbol        | Net PnL    | Win %  | P.F. | Max DD% | Trades|");
+    Log("+====+===============+============+========+======+=========+=======+");
+
+    for (var r = 0; r < results.length; r++) {
+        var res  = results[r];
+        var rank = padStr(String(r + 1), 2);
+        var sym  = padStr(res.symbol, 13);
+
+        if (res.error && res.trades === 0) {
+            Log("| " + rank + " | " + sym + " | ERROR: " + String(res.error).slice(0, 45));
+            continue;
+        }
+
+        var pnlStr = padStr(signStr(res.netPnl) + "$" + res.netPnl.toFixed(2), 10);
+        var winStr = padStr(res.winPct.toFixed(1) + "%", 6);
+        var pfStr  = padStr(res.profitFactor >= 999 ? "inf" : res.profitFactor.toFixed(2), 4);
+        var ddStr  = padStr(res.maxDD.toFixed(1) + "%", 7);
+        var trStr  = padStr(String(res.trades), 5);
+
+        Log("| " + rank + " | " + sym + " | " + pnlStr +
+            " | " + winStr + " | " + pfStr + " | " + ddStr + " | " + trStr + " |");
+    }
+
+    Log("+====+===============+============+========+======+=========+=======+");
+
+    // Summary row
+    var totalPnl    = 0, totalTrades = 0;
+    var totalWins   = 0, totalLosses = 0;
+    var totalGP     = 0, totalGL     = 0;
+    for (var r = 0; r < results.length; r++) {
+        totalPnl    += results[r].netPnl;
+        totalTrades += results[r].trades;
+        totalWins   += results[r].wins;
+        totalLosses += results[r].losses;
+    }
+    var overallWin = totalTrades > 0 ? totalWins / totalTrades * 100 : 0;
+
+    Log("\n[SUMMARY] Combined PnL  : " + signStr(totalPnl) + "$" + totalPnl.toFixed(2));
+    Log("[SUMMARY] Total Trades  : " + totalTrades);
+    Log("[SUMMARY] Overall Win % : " + overallWin.toFixed(1) + "%");
+    Log("[SUMMARY] Best Symbol   : " + results[0].symbol +
+        " (" + signStr(results[0].netPnl) + "$" + results[0].netPnl.toFixed(2) + ")");
+    Log("[SUMMARY] Worst Symbol  : " + results[results.length-1].symbol +
+        " (" + signStr(results[results.length-1].netPnl) + "$" + results[results.length-1].netPnl.toFixed(2) + ")");
+    Log("\n[DONE] Backtest complete.");
+}
+
+// =====================================================================
+// MAIN ENTRY POINT
+// =====================================================================
+
+function main() {
+    Log("+====================================================+");
+    Log("|   THE SURGEON BOT v2 — FMZ QUANT                  |");
+    Log("|   EMA3/8 Dual-TF + ADX + ATR SL/TP                |");
+    Log("+====================================================+");
+    Log("|  Mode     : " + (LIVE_MODE ? "LIVE TRADING on " + LIVE_SYMBOL : "MULTI-SYMBOL BACKTEST"));
+    Log("|  SL / TP  : " + ATR_SL_MULT + "× ATR / " + ATR_TP_MULT + "× ATR");
+    Log("|  Risk     : " + (RISK_PER_TRADE * 100) + "% | Max DD: " + (MAX_DD_PCT * 100) + "%");
+    Log("+====================================================+");
+
+    // ── BACKTEST MODE ─────────────────────────────────────────────
+    if (!LIVE_MODE) {
+        Log("[INFO] LIVE_MODE = false → Running multi-symbol backtest simulation.");
+        Log("[INFO] Note: symbol switching requires running in FMZ 'Live' tab,");
+        Log("[INFO] not the 'Backtest' tab (backtest locks to one symbol).");
+        runMultiSymbolBacktest();
+        return;
+    }
+
+    // ── LIVE TRADING MODE ─────────────────────────────────────────
+    exchange.IO("currency", LIVE_SYMBOL);
+    exchange.SetContractType("swap");
+
+    // Read actual balance from exchange
+    var account = exchange.GetAccount();
+    if (account) {
+        liveBalance = (account.Balance || 0) + (account.FrozenBalance || 0);
+        if (liveBalance <= 0) liveBalance = INITIAL_CAPITAL;
+    }
+    peakBalance = liveBalance;
+    Log("[CONNECT] Balance: $" + liveBalance.toFixed(2) + " | Symbol: " + LIVE_SYMBOL);
+
+    // Main loop
+    while (true) {
+
+        // ── Cooldown check ──────────────────────────────────────
+        if (cooldownUntil > 0 && Date.now() < cooldownUntil) {
+            var remH = ((cooldownUntil - Date.now()) / 3600000).toFixed(1);
+            Log("⏳ [COOLDOWN] Bot paused — " + remH + "h remaining.");
+            Sleep(POLL_MS);
+            continue;
+        }
+
+        // Notify when cooldown has just expired
+        if (cooldownUntil > 0 && Date.now() >= cooldownUntil) {
+            Log("✅ Cooldown ended — bot resumed trading.");
+            cooldownUntil = 0;
+            peakBalance   = liveBalance; // reset drawdown baseline after recovery
+        }
+
+        // ── Update balance ───────────────────────────────────────
+        var acc = exchange.GetAccount();
+        if (acc) liveBalance = (acc.Balance || 0) + (acc.FrozenBalance || 0);
+
+        // ── Drawdown guard ───────────────────────────────────────
+        if (checkDrawdown(liveBalance)) {
+            Sleep(POLL_MS);
+            continue;
+        }
+
+        // ── Fetch market data ────────────────────────────────────
+        var recordsH4  = exchange.GetRecords(PERIOD_H4);
+        var recordsM15 = exchange.GetRecords(PERIOD_M15);
+
+        if (!recordsH4 || recordsH4.length < 203 || !recordsM15 || recordsM15.length < 60) {
+            Log("[WARN] Not enough candle data — waiting...");
+            Sleep(POLL_MS);
+            continue;
+        }
+
+        // ── Compute indicators ───────────────────────────────────
+        var h4Bias    = getH4Bias(recordsH4);
+        var m15Result = checkM15Signal(recordsM15, h4Bias);
+        var signal    = m15Result.signal;
+        var atr       = m15Result.atr;
+        var adx       = m15Result.adx;
+        var vwap      = m15Result.vwap;
+        var price     = getCurrentPrice();
+
+        // ── Print dashboard ──────────────────────────────────────
+        printDashboard(h4Bias, signal, adx, atr, vwap, price);
+
+        // ── Trade logic ──────────────────────────────────────────
+        if (!currentTrade) {
+            if (signal) {
+                Log("[SIGNAL] " + signal + " confirmed | H4: " + h4Bias +
+                    " | ADX: " + adx.toFixed(1) +
+                    " | ATR: $" + atr.toFixed(2));
+
+                var ok = executeLiveTrade(signal, atr);
+                if (ok) {
+                    monitorLiveTrade(); // blocks until TP or SL hit
+                } else {
+                    Log("[WARN] Trade failed — will retry next cycle.");
+                    Sleep(POLL_MS);
+                }
+            } else {
+                Log("[SCAN] No signal | H4: " + h4Bias +
+                    " | ADX: " + adx.toFixed(1) + " | Waiting...");
+                Sleep(POLL_MS);
+            }
         } else {
-            // Unexpected state — resume monitoring
-            Log("[RESUME] Resuming monitor...");
-            monitorTrade();
+            // Resume monitoring after unexpected restart
+            Log("[RESUME] Resuming existing trade monitor...");
+            monitorLiveTrade();
         }
     }
 }
