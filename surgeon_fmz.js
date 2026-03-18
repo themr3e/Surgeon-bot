@@ -28,8 +28,9 @@ FMZ functions used:
 // Main Configuration
 // Can be changed from FMZ dashboard via strategy parameters
 // =====================================================================
+var TESTNET              = true;        // Set true when using Binance Futures Testnet
 var INITIAL_CAPITAL      = 500;         // Initial capital in USD
-var TOP_SYMBOLS_COUNT    = 200;         // Number of top symbols by volume
+var TOP_SYMBOLS_COUNT    = 200;         // Number of top symbols by volume (ignored on testnet)
 var TIMEFRAME            = PERIOD_M5;  // Timeframe (5 minutes)
 var CANDLES_LIMIT        = 201;        // +1 to exclude unclosed candle
 var LEVERAGE             = 10;         // Leverage
@@ -44,6 +45,16 @@ var POSITION_POLL_MS     = 10000;      // Poll position every 10 seconds
 var MIN_BALANCE          = 50;         // Minimum balance before stopping
 var SYMBOL_REFRESH_HOURS = 4;          // Refresh symbol list every 4 hours
 var DASHBOARD_INTERVAL   = 300000;     // Print dashboard every 5 minutes (ms)
+
+// =====================================================================
+// Testnet Symbol List
+// Binance Futures Testnet only supports a small set of symbols.
+// Used automatically when TESTNET = true.
+// =====================================================================
+var TESTNET_SYMBOLS = [
+    "BTC_USDT", "ETH_USDT", "BNB_USDT", "SOL_USDT", "XRP_USDT",
+    "ADA_USDT", "DOGE_USDT", "LTC_USDT", "LINK_USDT", "DOT_USDT"
+];
 
 // =====================================================================
 // Excluded Stablecoins
@@ -124,6 +135,10 @@ function retryCall(fn, maxRetries, delayMs) {
  // Filter and sort by trading volume, return top TOP_SYMBOLS_COUNT symbols
  // Uses Binance Futures REST API directly via exchange.IO
 function fetchTopSymbols() {
+    if (TESTNET) {
+        Log("[SYMBOLS] Testnet mode — using hardcoded symbol list (" + TESTNET_SYMBOLS.length + " symbols).");
+        return TESTNET_SYMBOLS.slice();
+    }
     Log("[SYMBOLS] Refreshing symbol list...");
 
     var tickers = retryCall(function () {
@@ -1047,7 +1062,7 @@ function printBanner() {
     Log("|          Binance Futures Scalping Bot                |");
     Log("+------------------------------------------------------+");
     Log("|  Platform           : FMZ Quant (fmz.com)");
-    Log("|  Exchange           : Binance USDT-M Futures");
+    Log("|  Exchange           : Binance USDT-M Futures" + (TESTNET ? " [TESTNET]" : ""));
     Log("|  Initial Capital    : $" + INITIAL_CAPITAL);
     Log("|  Leverage           : " + LEVERAGE + "x");
     Log("|  Timeframe          : 5 minutes");
