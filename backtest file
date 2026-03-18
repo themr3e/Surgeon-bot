@@ -957,6 +957,22 @@ function main() {
                 var ok = executeTrade(h1Result.signal, h1Result.atr);  // ETH Edition
                 if (ok) {
                     monitorTrade();    // blocks until TP or SL hit
+
+                    // After trade closes, re-check session window.
+                    // monitorTrade() can run for many hours — by the
+                    // time it returns, the session may have expired.
+                    // Re-fetch latest H1 candle for accurate time check.
+                    var postTradeRecs = exchange.GetRecords(PERIOD_H1);
+                    if (postTradeRecs && postTradeRecs.length >= 2) {
+                        var postCandle = postTradeRecs[postTradeRecs.length - 2];
+                        if (!isInTradingSession(postCandle.Time)) {
+                            var postHour = new Date(postCandle.Time).getUTCHours();
+                            Log("[SESSION] Trade closed outside window — hour: " +
+                                postHour + ":00 UTC. Waiting for next session.");
+                            Sleep(POLL_MS);
+                            continue;
+                        }
+                    }
                 } else {
                     Log("[WARN] Trade execution failed — retrying next cycle.");
                     Sleep(POLL_MS);
@@ -971,6 +987,19 @@ function main() {
             // Unexpected state — resume monitoring
             Log("[RESUME] Resuming trade monitor...");
             monitorTrade();
+
+            // Re-check session after resumed trade closes
+            var resumeRecs = exchange.GetRecords(PERIOD_H1);
+            if (resumeRecs && resumeRecs.length >= 2) {
+                var resumeCandle = resumeRecs[resumeRecs.length - 2];
+                if (!isInTradingSession(resumeCandle.Time)) {
+                    var resumeHour = new Date(resumeCandle.Time).getUTCHours();
+                    Log("[SESSION] Resumed trade closed outside window — hour: " +
+                        resumeHour + ":00 UTC. Waiting for next session.");
+                    Sleep(POLL_MS);
+                    continue;
+                }
+            }
         }
     }
 }
