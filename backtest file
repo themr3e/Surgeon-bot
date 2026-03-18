@@ -24,7 +24,7 @@ STRATEGY:
              + H1 price above VWAP
              + H1 ADX > 25
              + H1 ATR > avg ATR(20)
-             + Session: 13:00–16:00 UTC only
+             + Session: 12:00–17:00 UTC only
 
   ─ Short : H4 EMA8 < EMA21 AND price < EMA200
              + H4 gap to EMA200 > 1% (clear distance)
@@ -33,7 +33,7 @@ STRATEGY:
              + H1 price below VWAP
              + H1 ADX > 25
              + H1 ATR > avg ATR(20)
-             + Session: 13:00–16:00 UTC only
+             + Session: 12:00–17:00 UTC only
 
   Stop Loss  : entry ± 2.0 × ATR(14)
   Take Profit: entry ± 4.0 × ATR(14)   ← R:R = 2:1
@@ -76,7 +76,7 @@ var ATR_SL_MULT     = 2.0;     // stop loss  = 2.0 × ATR from entry  // ETH Edi
 var ATR_TP_MULT     = 4.0;     // take profit = 4.0 × ATR from entry  (R:R 2:1)  // ETH Edition
 
 var ADX_PERIOD      = 14;      // ADX calculation period
-var ADX_MIN         = 25;      // minimum ADX value to allow entry  // ETH Edition
+var ADX_MIN         = 20;      // minimum ADX value to allow entry  // ETH Edition
 
 var MAX_DD_PCT      = 0.20;    // max drawdown threshold (20%)
 var COOLDOWN_HOURS  = 12;      // hours to pause after max DD hit
@@ -86,8 +86,8 @@ var POLL_MS         = 3600000; // H1 candle duration in ms
                                // matches backtest resolution perfectly
 
 // ── Trading Session Filter ───────────────────────────────────────────
-var SESSION_START_UTC = 13;    // 1:00 PM UTC — London/NY overlap opens
-var SESSION_END_UTC   = 16;    // 4:00 PM UTC — peak liquidity window
+var SESSION_START_UTC = 12;    // 12:00 PM UTC — session opens
+var SESSION_END_UTC   = 17;    // 5:00 PM UTC — session closes
 
 // ── Realistic Cost Simulation ─────────────────────────────────────────
 var MAKER_FEE      = 0.0002;   // 0.02% per side (Binance Futures maker)
@@ -129,7 +129,7 @@ function signStr(val) {
 }
 
 // ── Trading Session Check ─────────────────────────────────────────────
-// Returns true only during the 13:00–16:00 UTC London/NY overlap window.
+// Returns true only during the 12:00–17:00 UTC trading window.
 // candleTimeMs: timestamp of the last closed H1 candle (from records[].Time)
 // Using candle time — not new Date() — ensures correct behaviour in backtest.
 function isInTradingSession(candleTimeMs) {
@@ -362,7 +362,7 @@ function getH4Bias(recordsH4) {
 // Checks all conditions on the last two closed H1 candles.
 // Condition 1 : Fresh EMA8/EMA21 crossover (strict: happened on current candle)
 // Condition 2 : Price on correct side of VWAP
-// Condition 3 : ADX > ADX_MIN (25)
+// Condition 3 : ADX > ADX_MIN (20)
 // Condition 4 : Current ATR > 20-period ATR average (volatility expansion)
 // Condition 5 : H4 bias matches direction (passed as h4Result object)
 // Condition 6 : SHORT only — H4 EMA200 gap > 1% AND last H4 candle bearish
@@ -422,15 +422,16 @@ function checkH1Signal(recordsH1, h4Result) {
     // ── Condition 4: ATR volatility expansion ──
     var atrSpike = atr > atrSMA;
 
-    // ── Condition 5+6: SHORT extra filters — H4 EMA200 gap > 1% AND bearish candle ──
-    // ETH Edition — tighter SHORT entry for ETH downtrends
-    var shortExtra = h4Result.ema200gap > 0.01 && h4Result.lastCandleBearish;
+    // ── Condition 6: SHORT extra filter — H4 EMA200 gap > 0.5% only ──
+    // lastCandleBearish removed — combined with other filters it was
+    // too restrictive and produced near-zero SHORT signals on ETH.
+    var shortGapOk = h4Result.ema200gap > 0.005;
 
     // ── Signal: all conditions + H4 bias agreement ──
     var signal = null;
     if (h4Result.bias === "BULL" && crossUp   && aboveVWAP && adxOk && atrSpike)
         signal = "LONG";
-    if (h4Result.bias === "BEAR" && crossDown && belowVWAP && adxOk && atrSpike && shortExtra)
+    if (h4Result.bias === "BEAR" && crossDown && belowVWAP && adxOk && atrSpike && shortGapOk)
         signal = "SHORT";
 
     return { signal: signal, atr: atr, adx: adx, vwap: vwap, ema8: e8c, ema21: e21c };
@@ -900,25 +901,31 @@ function main() {
             continue;
         }
 
-        // ── Fetch candle data for both timeframes ───────────────
-        var recordsH4 = exchange.GetRecords(PERIOD_H4);
-        var recordsH1 = exchange.GetRecords(PERIOD_H1);
-
-        if (!recordsH4 || recordsH4.length < 230 ||
-            !recordsH1 || recordsH1.length < 80) {
-            Log("[WARN] Insufficient candle data — waiting for warmup...");
+        // ── Session pre-check — lightweight fetch before full data load ──
+        // Fetches only H1 records to get current candle time.
+        // Avoids expensive H4 fetch during off-session hours.
+        var sessionRecs = exchange.GetRecords(PERIOD_H1);
+        if (!sessionRecs || sessionRecs.length < 2) {
+            Sleep(POLL_MS);
+            continue;
+        }
+        var lastH1Candle = sessionRecs[sessionRecs.length - 2];
+        if (!isInTradingSession(lastH1Candle.Time)) {
+            var sessionHour = new Date(lastH1Candle.Time).getUTCHours();
+            Log("[SESSION] Outside window — hour: " + sessionHour +
+                ":00 UTC | Window: " + SESSION_START_UTC +
+                ":00 - " + SESSION_END_UTC + ":00 UTC");
             Sleep(POLL_MS);
             continue;
         }
 
-        // ── Trading session filter (uses candle time, not real-world clock) ──
-        // Index -2 = last CLOSED candle (excludes the still-forming candle)
-        var lastH1Candle = recordsH1[recordsH1.length - 2];
-        if (!isInTradingSession(lastH1Candle.Time)) {
-            var sessionHour = new Date(lastH1Candle.Time).getUTCHours();
-            Log("[SESSION] Outside trading window — candle hour: " +
-                sessionHour + ":00 UTC | Active window: " +
-                SESSION_START_UTC + ":00 - " + SESSION_END_UTC + ":00 UTC");
+        // ── Full candle fetch — only runs during active session ──
+        var recordsH4 = exchange.GetRecords(PERIOD_H4);
+        var recordsH1 = sessionRecs; // reuse already-fetched H1 data
+
+        if (!recordsH4 || recordsH4.length < 230 ||
+            !recordsH1 || recordsH1.length < 80) {
+            Log("[WARN] Insufficient candle data — waiting for warmup...");
             Sleep(POLL_MS);
             continue;
         }
